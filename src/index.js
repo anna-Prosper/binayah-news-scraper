@@ -193,6 +193,44 @@ async function fetchAll() {
     .sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
 }
 
+// ── Image enrichment ─────────────────────────────────────────────────────────
+
+async function fetchOgImage(url) {
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": UA, "Accept": "text/html" },
+      signal: AbortSignal.timeout(6_000),
+      redirect: "follow",
+    });
+    const html = await res.text();
+    const m =
+      html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
+      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+    const img = m?.[1] || "";
+    // Skip data URIs and tiny placeholders
+    return img.startsWith("http") ? img : "";
+  } catch {
+    return "";
+  }
+}
+
+async function enrichWithImages(articles) {
+  const toEnrich = articles.filter((a) => !a.imageUrl).slice(0, 100);
+  if (!toEnrich.length) return;
+  console.log(`[images] fetching og:image for ${toEnrich.length} articles...`);
+  const CONCURRENCY = 8;
+  let enriched = 0;
+  for (let i = 0; i < toEnrich.length; i += CONCURRENCY) {
+    await Promise.allSettled(
+      toEnrich.slice(i, i + CONCURRENCY).map(async (a) => {
+        const img = await fetchOgImage(a.url);
+        if (img) { a.imageUrl = img; enriched++; }
+      })
+    );
+  }
+  console.log(`[images] enriched ${enriched}/${toEnrich.length}`);
+}
+
 // ── In-memory cache ──────────────────────────────────────────────────────────
 
 let cache = { data: null, fetchedAt: 0 };
@@ -203,6 +241,8 @@ async function getNews(limit = 50) {
     cache.data = await fetchAll();
     cache.fetchedAt = Date.now();
     console.log(`[cache] ${cache.data.length} articles cached`);
+    // Enrich images in background — cache is immediately available
+    enrichWithImages(cache.data).catch((e) => console.warn("[images] enrich failed:", e.message));
   }
   return cache.data.slice(0, limit);
 }
