@@ -21,6 +21,7 @@ const GNEWS_FEEDS = [
   { q: "gulfbusiness.com UAE real estate",          source: "Gulf Business" },
   { q: "tradearabia UAE property real estate",      source: "Trade Arabia" },
   { q: "constructionweekonline UAE real estate",    source: "Construction Week" },
+  { q: "khaleejtimes UAE property real estate",     source: "Khaleej Times" },
 ];
 
 function gnewsUrl(q) {
