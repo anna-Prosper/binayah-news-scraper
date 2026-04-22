@@ -121,8 +121,13 @@ async function uploadImage(ogUrl, articleUrl) {
       Bucket: BUCKET, Key: key, Body: buf,
       ContentType: ct, CacheControl: "public, max-age=31536000",
     }));
-    return `https://${BUCKET}.s3.${process.env.AWS_REGION || "us-east-1"}.amazonaws.com/${key}`;
-  } catch { return ""; }
+    const s3Url = `https://${BUCKET}.s3.${process.env.AWS_REGION || "us-east-1"}.amazonaws.com/${key}`;
+    console.log(`[s3] uploaded ${key} (${buf.length}b)`);
+    return s3Url;
+  } catch (e) {
+    console.warn(`[s3] uploadImage failed for ${articleUrl.slice(0, 60)}: ${e.message}`);
+    return "";
+  }
 }
 
 // ── RSS sources ───────────────────────────────────────────────────────────────
