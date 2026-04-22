@@ -260,13 +260,13 @@ async function fetchOgImageHeadless(url) {
 
 async function enrichWithImages(articles) {
   // Fast path — plain HTTP for most sources
-  const fast = articles.filter((a) => !a.imageUrl && !HEADLESS_DOMAINS.some((d) => a.url.includes(d))).slice(0, 80);
+  const fast = articles.filter((a) => !a.imageUrl && !HEADLESS_DOMAINS.some((d) => a.url.includes(d))).slice(0, 250);
   if (fast.length) {
     console.log(`[images] fast: ${fast.length} articles...`);
     let enriched = 0;
-    for (let i = 0; i < fast.length; i += 4) {
+    for (let i = 0; i < fast.length; i += 6) {
       await Promise.allSettled(
-        fast.slice(i, i + 4).map(async (a) => {
+        fast.slice(i, i + 6).map(async (a) => {
           const img = await fetchOgImage(a.url);
           if (img) { a.imageUrl = img; enriched++; }
         })
@@ -276,7 +276,7 @@ async function enrichWithImages(articles) {
   }
 
   // Headless path — sparticuz/chromium for Cloudflare-protected domains
-  const slow = articles.filter((a) => !a.imageUrl && HEADLESS_DOMAINS.some((d) => a.url.includes(d))).slice(0, 15);
+  const slow = articles.filter((a) => !a.imageUrl && HEADLESS_DOMAINS.some((d) => a.url.includes(d))).slice(0, 20);
   if (slow.length) {
     console.log(`[images] headless: ${slow.length} articles...`);
     let enriched = 0;
