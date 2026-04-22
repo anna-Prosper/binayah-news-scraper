@@ -52,24 +52,29 @@ async function loadCaches() {
     console.warn("[mongo] MONGODB_URI not set — caches will not persist");
     return;
   }
-  mongoClient = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 8000 });
-  await mongoClient.connect();
-  // Dedicated DB for scraper state — separate from app data.
-  // DB name can be overridden via MONGODB_DB; defaults to binayah_migration.
-  const db = mongoClient.db(process.env.MONGODB_DB || "binayah_migration");
-  urlCol   = db.collection("newsScraper_urlCache");
-  imageCol = db.collection("newsScraper_imageCache");
-  bodyCol  = db.collection("newsScraper_bodyCache");
+  try {
+    mongoClient = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 8000 });
+    await mongoClient.connect();
+    // Dedicated DB for scraper state — separate from app data.
+    const db = mongoClient.db(process.env.MONGODB_DB || "db_migration");
+    urlCol   = db.collection("newsScraper_urlCache");
+    imageCol = db.collection("newsScraper_imageCache");
+    bodyCol  = db.collection("newsScraper_bodyCache");
 
-  const [urls, images, bodies] = await Promise.all([
-    urlCol.find({}, { projection: { _id: 1, url: 1 } }).toArray(),
-    imageCol.find({}, { projection: { _id: 1, imageUrl: 1 } }).toArray(),
-    bodyCol.find({}, { projection: { _id: 1, body: 1 } }).toArray(),
-  ]);
-  for (const r of urls)   urlCache[r._id]   = r.url;
-  for (const r of images) imageCache[r._id] = r.imageUrl;
-  for (const r of bodies) bodyCache[r._id]  = r.body;
-  console.log(`[mongo] url-cache: ${urls.length}, image-cache: ${images.length}, body-cache: ${bodies.length}`);
+    const [urls, images, bodies] = await Promise.all([
+      urlCol.find({}, { projection: { _id: 1, url: 1 } }).toArray(),
+      imageCol.find({}, { projection: { _id: 1, imageUrl: 1 } }).toArray(),
+      bodyCol.find({}, { projection: { _id: 1, body: 1 } }).toArray(),
+    ]);
+    for (const r of urls)   urlCache[r._id]   = r.url;
+    for (const r of images) imageCache[r._id] = r.imageUrl;
+    for (const r of bodies) bodyCache[r._id]  = r.body;
+    console.log(`[mongo] url-cache: ${urls.length}, image-cache: ${images.length}, body-cache: ${bodies.length}`);
+  } catch (e) {
+    console.warn("[mongo] load failed, continuing without persistence:", e.message);
+    mongoClient = null;  // flushCaches() will no-op
+    urlCol = imageCol = bodyCol = null;
+  }
 }
 
 function queueUrl(k, v)   { urlCache[k]   = v; pendingWrites.url.set(k, v); }
@@ -77,7 +82,7 @@ function queueImage(k, v) { imageCache[k] = v; pendingWrites.image.set(k, v); }
 function queueBody(k, v)  { bodyCache[k]  = v; pendingWrites.body.set(k, v); }
 
 async function flushCaches() {
-  if (!mongoClient) return;
+  if (!mongoClient || !urlCol) return;
   const tasks = [];
   if (pendingWrites.url.size) {
     const ops = [...pendingWrites.url].map(([k, v]) => ({ updateOne: { filter: { _id: k }, update: { $set: { url: v } }, upsert: true } }));
@@ -231,30 +236,38 @@ function resolveGNewsUrl(gnewsArticleUrl) {
   } catch { return null; }
 }
 
-// Resolve a GNews URL to the real article URL using headless
+// Resolve a GNews URL to the real article URL using headless.
+// GNews serves a short HTML page with a JS redirect to the publisher — we wait
+// for that navigation (up to 25s total) rather than domcontentloaded, which
+// fires before the redirect.
 async function resolveGNewsHeadless(gnewsUrl) {
   return withPage(async (page) => {
-    await page.setDefaultNavigationTimeout(15_000);
-    await page.goto(gnewsUrl, { waitUntil: "domcontentloaded" });
-    let finalUrl = page.url();
-    if (finalUrl.includes("news.google.com")) {
-      await page.waitForNavigation({ timeout: 5000 }).catch(() => {});
-      finalUrl = page.url();
+    await page.setDefaultNavigationTimeout(25_000);
+    try {
+      await page.goto(gnewsUrl, { waitUntil: "domcontentloaded" });
+    } catch { /* initial navigation timed out — still check current URL */ }
+    // Poll for redirect up to 8s
+    for (let i = 0; i < 16; i++) {
+      const u = page.url();
+      if (!u.includes("news.google.com")) return u;
+      await new Promise((r) => setTimeout(r, 500));
     }
-    return finalUrl.includes("news.google.com") ? null : finalUrl;
+    return null;
   });
 }
 
 // Get og:image from a URL using headless (for Cloudflare-protected domains)
 async function ogImageHeadless(url) {
   return withPage(async (page) => {
-    await page.setDefaultNavigationTimeout(20_000);
-    await page.goto(url, { waitUntil: "domcontentloaded" });
+    await page.setDefaultNavigationTimeout(30_000);
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    } catch { /* still try to read meta if partial load */ }
     const img = await page.evaluate(() =>
       document.querySelector('meta[property="og:image"]')?.getAttribute("content") ||
       document.querySelector('meta[name="twitter:image"]')?.getAttribute("content") || ""
-    );
-    return img.startsWith("http") ? img : null;
+    ).catch(() => "");
+    return img && img.startsWith("http") ? img : null;
   });
 }
 
