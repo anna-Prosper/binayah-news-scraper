@@ -43,20 +43,28 @@ async function s3Put(key, data) {
   } catch (e) { console.warn("[s3] put failed:", e.message); }
 }
 
-// gnewsUrl → real article URL (persists so we never resolve the same GNews URL twice)
-let urlCache = {};
-// real article URL → S3 image URL (persists so we never re-upload the same image)
-let imageCache = {};
+let urlCache   = {}; // gnewsUrl → real article URL
+let imageCache = {}; // real article URL → S3 image URL
+let bodyCache  = {}; // real article URL → article body text (≤1500 chars)
 
 async function loadCaches() {
-  const [u, i] = await Promise.all([s3Get("news/url-cache.json"), s3Get("news/image-cache.json")]);
+  const [u, i, b] = await Promise.all([
+    s3Get("news/url-cache.json"),
+    s3Get("news/image-cache.json"),
+    s3Get("news/body-cache.json"),
+  ]);
   urlCache   = u || {};
   imageCache = i || {};
-  console.log(`[s3] url-cache: ${Object.keys(urlCache).length}, image-cache: ${Object.keys(imageCache).length}`);
+  bodyCache  = b || {};
+  console.log(`[s3] url-cache: ${Object.keys(urlCache).length}, image-cache: ${Object.keys(imageCache).length}, body-cache: ${Object.keys(bodyCache).length}`);
 }
 
 async function saveCaches() {
-  await Promise.all([s3Put("news/url-cache.json", urlCache), s3Put("news/image-cache.json", imageCache)]);
+  await Promise.all([
+    s3Put("news/url-cache.json", urlCache),
+    s3Put("news/image-cache.json", imageCache),
+    s3Put("news/body-cache.json", bodyCache),
+  ]);
 }
 
 async function uploadImage(ogUrl, articleUrl) {
@@ -114,7 +122,7 @@ async function fetchAll() {
       const feed = await parser.parseURL(url);
       for (const item of feed.items ?? []) {
         if (!item.title || !item.link) continue;
-        results.push({ source, title: item.title.trim(), url: item.link, summary: (item.contentSnippet || item.summary || "").slice(0, 300), imageUrl: item.enclosure?.url || item["media:content"]?.["$"]?.url || "", publishedAt: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString() });
+        results.push({ source, title: item.title.trim(), url: item.link, summary: (item.contentSnippet || item.summary || "").slice(0, 300), imageUrl: item.enclosure?.url || item["media:content"]?.["$"]?.url || "", body: bodyCache[item.link] || "", publishedAt: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString() });
       }
       console.log(`[rss] ${source}: ${feed.items?.length ?? 0} items`);
     } catch (e) { console.warn(`[rss] ${source} failed:`, e.message); }
@@ -127,7 +135,7 @@ async function fetchAll() {
         if (!item.title || !item.link) continue;
         // Use cached real URL if we've resolved this GNews link before
         const realUrl = urlCache[item.link] || item.link;
-        results.push({ source, title: item.title.trim(), url: realUrl, gnewsUrl: item.link, summary: "", imageUrl: imageCache[realUrl] || "", publishedAt: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString() });
+        results.push({ source, title: item.title.trim(), url: realUrl, gnewsUrl: item.link, summary: "", imageUrl: imageCache[realUrl] || "", body: bodyCache[realUrl] || "", publishedAt: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString() });
       }
       console.log(`[gnews] ${source}: ${feed.items?.length ?? 0} items`);
     } catch (e) { console.warn(`[gnews] ${source} failed:`, e.message); }
@@ -194,26 +202,64 @@ async function ogImageHeadless(url) {
   });
 }
 
-// ── og:image via plain HTTP ───────────────────────────────────────────────────
+// ── Page data (og:image + article body) via plain HTTP ───────────────────────
 
 const BAD_IMAGE_HOSTS = ["lh3.googleusercontent.com", "news.google.com"];
+const SKIP_BODY_DOMAINS = ["arabianbusiness.com", "reuters.com"];
 
-async function ogImageFetch(url) {
+function cleanBodyText(text) {
+  return text
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ").trim()
+    .slice(0, 1500);
+}
+
+function extractBody(html) {
+  // 1. JSON-LD articleBody (most reliable — structured data)
+  for (const m of html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const d = JSON.parse(m[1]);
+      const items = Array.isArray(d) ? d : [d, ...(d["@graph"] || [])];
+      for (const item of items) {
+        if (item?.articleBody) return cleanBodyText(item.articleBody);
+      }
+    } catch {}
+  }
+  // 2. <article> tag paragraphs
+  const artHtml = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i)?.[1] || "";
+  if (artHtml) {
+    const paras = [...artHtml.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)]
+      .map((m) => m[1].replace(/<[^>]+>/g, "").trim())
+      .filter((p) => p.length > 40);
+    if (paras.length >= 2) return cleanBodyText(paras.join(" "));
+  }
+  // 3. Largest paragraph cluster in full page
+  const paras = [...html.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)]
+    .map((m) => m[1].replace(/<[^>]+>/g, "").trim())
+    .filter((p) => p.length > 60);
+  if (paras.length >= 2) return cleanBodyText(paras.slice(0, 7).join(" "));
+  return "";
+}
+
+async function fetchPageData(url) {
   try {
-    const res = await fetch(url, { headers: { "User-Agent": UA, Accept: "text/html" }, signal: AbortSignal.timeout(8_000), redirect: "follow" });
+    const res = await fetch(url, { headers: { "User-Agent": UA, Accept: "text/html" }, signal: AbortSignal.timeout(10_000), redirect: "follow" });
+    if (!res.ok) return { imageUrl: "", body: "" };
     const html = await res.text();
     const m = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
               html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
     const img = m?.[1] || "";
-    if (!img.startsWith("http")) return "";
-    if (BAD_IMAGE_HOSTS.some((h) => img.includes(h))) return "";
-    return img;
-  } catch { return ""; }
+    const imageUrl = img.startsWith("http") && !BAD_IMAGE_HOSTS.some((h) => img.includes(h)) ? img : "";
+    const body = SKIP_BODY_DOMAINS.some((d) => url.includes(d)) ? "" : extractBody(html);
+    return { imageUrl, body };
+  } catch { return { imageUrl: "", body: "" }; }
 }
 
 // ── Enrichment pipeline ───────────────────────────────────────────────────────
 
-const HEADLESS_DOMAINS = ["arabianbusiness.com", "reuters.com", "constructionweekonline.com"];
+const HEADLESS_DOMAINS = ["arabianbusiness.com", "reuters.com"];
 let enrichmentRunning = false;
 
 async function enrichWithImages(articles) {
@@ -244,23 +290,34 @@ async function enrichWithImages(articles) {
       await _browser?.close().catch(() => {}); _browser = null;
     }
 
-    // Step 2: Fast HTTP og:image for all non-blocked, non-GNews articles (no cap)
-    const fast = articles.filter((a) => !a.imageUrl && !a.url.includes("news.google.com") && !HEADLESS_DOMAINS.some((d) => a.url.includes(d)));
+    // Step 2: Fetch page data (image + body) for all open-access articles in one request
+    const fast = articles.filter((a) =>
+      (!a.imageUrl || !a.body) &&
+      !a.url.includes("news.google.com") &&
+      !HEADLESS_DOMAINS.some((d) => a.url.includes(d))
+    );
     if (fast.length) {
-      console.log(`[images] fast: ${fast.length} articles...`);
-      let enriched = 0;
+      console.log(`[enrich] fast: ${fast.length} articles...`);
+      let imgCount = 0, bodyCount = 0;
       for (let i = 0; i < fast.length; i += 8) {
         await Promise.allSettled(fast.slice(i, i + 8).map(async (a) => {
-          const ogUrl = await ogImageFetch(a.url);
-          if (!ogUrl) return;
-          const s3Url = await uploadImage(ogUrl, a.url);
-          a.imageUrl = s3Url || ogUrl;
-          imageCache[a.url] = a.imageUrl;
-          dirty = true;
-          enriched++;
+          const { imageUrl, body } = await fetchPageData(a.url);
+          if (imageUrl && !a.imageUrl) {
+            const s3Url = await uploadImage(imageUrl, a.url);
+            a.imageUrl = s3Url || imageUrl;
+            imageCache[a.url] = a.imageUrl;
+            dirty = true;
+            imgCount++;
+          }
+          if (body && !a.body) {
+            a.body = body;
+            bodyCache[a.url] = body;
+            dirty = true;
+            bodyCount++;
+          }
         }));
       }
-      console.log(`[images] fast enriched ${enriched}/${fast.length}`);
+      console.log(`[enrich] fast done — images: ${imgCount}, bodies: ${bodyCount}/${fast.length}`);
     }
 
     // Step 3: Headless og:image for Cloudflare-protected domains, recent only
@@ -326,7 +383,7 @@ const server = http.createServer(async (req, res) => {
     const bySource = {};
     for (const a of cache.data ?? []) bySource[a.source] = (bySource[a.source] ?? 0) + 1;
     res.writeHead(200);
-    return res.end(JSON.stringify({ ok: true, cached: !!cache.data, articles: cache.data?.length ?? 0, urlCacheSize: Object.keys(urlCache).length, imageCacheSize: Object.keys(imageCache).length, fetchedAt: cache.fetchedAt ? new Date(cache.fetchedAt).toISOString() : null, bySource }));
+    return res.end(JSON.stringify({ ok: true, cached: !!cache.data, articles: cache.data?.length ?? 0, urlCacheSize: Object.keys(urlCache).length, imageCacheSize: Object.keys(imageCache).length, bodyCacheSize: Object.keys(bodyCache).length, fetchedAt: cache.fetchedAt ? new Date(cache.fetchedAt).toISOString() : null, bySource }));
   }
 
   if (req.method === "GET" && url.pathname === "/news") {
