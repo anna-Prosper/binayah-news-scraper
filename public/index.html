@@ -196,6 +196,20 @@
     padding: 8px 32px 0;
   }
 
+  .week-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--muted);
+    cursor: pointer;
+    flex-shrink: 0;
+    white-space: nowrap;
+    user-select: none;
+  }
+  .week-toggle input { accent-color: var(--accent); cursor: pointer; }
+  .week-toggle:hover { color: var(--text); }
+
   @media (max-width: 600px) {
     header { padding: 14px 16px; flex-wrap: wrap; }
     #filters { padding: 10px 16px; }
@@ -214,6 +228,9 @@
   <div class="search-wrap">
     <input type="search" id="search" placeholder="Search articles…" autocomplete="off"/>
   </div>
+  <label class="week-toggle" title="Show only articles from the last 7 days">
+    <input type="checkbox" id="week-only"/> 7 days
+  </label>
 </header>
 
 <div id="filters">
@@ -234,6 +251,7 @@ const API = "https://binayah-news-scraper.onrender.com/news?limit=1000";
 let allArticles = [];
 let activeSource = "all";
 let searchQuery  = "";
+let weekOnly     = false;
 
 // ── Fetch ──────────────────────────────────────────────────────────────────
 async function loadArticles() {
@@ -277,9 +295,11 @@ function buildFilters() {
 // ── Render ─────────────────────────────────────────────────────────────────
 function render() {
   const q = searchQuery.trim().toLowerCase();
+  const weekCutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
   const visible = allArticles.filter(a => {
     if (activeSource !== "all" && a.source !== activeSource) return false;
     if (q && !a.title.toLowerCase().includes(q)) return false;
+    if (weekOnly && new Date(a.publishedAt).getTime() < weekCutoff) return false;
     return true;
   });
 
@@ -332,6 +352,11 @@ document.getElementById("search").addEventListener("input", e => {
     searchQuery = e.target.value;
     render();
   }, 200);
+});
+
+document.getElementById("week-only").addEventListener("change", e => {
+  weekOnly = e.target.checked;
+  render();
 });
 
 loadArticles();

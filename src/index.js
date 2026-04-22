@@ -180,17 +180,13 @@ async function fetchAll() {
   }
 
   const RE_KEYWORDS = /real.?estate|property|properties|mortgage|rent|landlord|tenant|apartment|villa|residential|commercial|off.?plan|handover|developer|realty|housing|sqft|sq\.ft|dubai land|DLD|RERA|leasehold|freehold/i;
-  const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
-  const cutoff = Date.now() - THIRTY_DAYS_MS;
 
-  // Filter to real estate articles published within the last 7 days, dedupe by URL
+  // Keep only real estate articles, dedupe by URL, sort newest first
   const seen = new Set();
   return results
     .filter((a) => {
       if (seen.has(a.url)) return false;
       seen.add(a.url);
-      const age = new Date(a.publishedAt).getTime();
-      if (age < cutoff) return false;
       return RE_KEYWORDS.test(a.title) || RE_KEYWORDS.test(a.summary || "");
     })
     .sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
