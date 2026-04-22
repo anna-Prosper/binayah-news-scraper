@@ -85,86 +85,23 @@ async function uploadImage(ogUrl, articleUrl) {
 // ── RSS sources ───────────────────────────────────────────────────────────────
 
 const RSS_FEEDS = [
-  { url: "https://economymiddleeast.com/feed",                      source: "Economy Middle East" },
-  { url: "https://www.arabianbusiness.com/feed",                    source: "Arabian Business" },
-  { url: "https://www.emirates247.com/rss/mobile/v2/business.rss",  source: "Emirates247" },
+  { url: "https://www.arabianbusiness.com/feed", source: "Arabian Business" },
 ];
 
 const GNEWS_FEEDS = [
-  { q: "zawya real estate UAE property",            source: "Zawya" },
-  { q: "reuters UAE real estate property market",   source: "Reuters" },
-  { q: "gulfbusiness.com UAE real estate",          source: "Gulf Business" },
-  { q: "tradearabia UAE property real estate",      source: "Trade Arabia" },
-  { q: "constructionweekonline UAE real estate",    source: "Construction Week" },
-  { q: "khaleejtimes UAE property real estate",     source: "Khaleej Times" },
+  { q: "gulfnews.com property real estate UAE",              source: "Gulf News" },
+  { q: "zawya real estate UAE property",                     source: "Zawya" },
+  { q: "reuters UAE real estate property market",            source: "Reuters" },
+  { q: "gulfbusiness.com UAE real estate",                   source: "Gulf Business" },
+  { q: "tradearabia.com UAE property real estate",           source: "Trade Arabia" },
+  { q: "constructionweekonline UAE real estate",             source: "Construction Week" },
+  { q: "khaleejtimes UAE property real estate",              source: "Khaleej Times" },
+  { q: "economymiddleeast.com property real estate UAE",     source: "Economy Middle East" },
+  { q: "emirates247.com property real estate UAE",           source: "Emirates247" },
 ];
 
 function gnewsUrl(q) {
   return `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en&gl=AE&ceid=AE:en`;
-}
-
-// ── HTML scrapers ─────────────────────────────────────────────────────────────
-
-async function scrapeGulfNews() {
-  const res = await fetch("https://gulfnews.com/business/property", {
-    headers: { "User-Agent": UA, Accept: "text/html" },
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!res.ok) throw new Error(`Gulf News HTTP ${res.status}`);
-  const html = await res.text();
-  const decode = (s) => s.replace(/&amp;/g, "&").replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">");
-  const articles = [];
-  const seen = new Set();
-  const hrefRe = /<a\s+href="(\/business\/property\/[^"]+)"/g;
-  let m;
-  while ((m = hrefRe.exec(html)) !== null) {
-    const url = "https://gulfnews.com" + m[1];
-    if (seen.has(url)) continue;
-    const win = html.slice(m.index, m.index + 1400);
-    const text = (raw) => decode(raw.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim());
-    const h1 = win.match(/<h1[^>]*>([\s\S]*?)<\/h1>/);
-    const h2 = win.match(/<h2[^>]*>([\s\S]*?)<\/h2>/);
-    const h3 = win.match(/<h3[^>]*>([\s\S]*?)<\/h3>/);
-    const img = win.match(/<img\s+src="(\/\/[^"]+)"/);
-    let title, summary;
-    if (h1)      { title = text(h1[1]); summary = h2 ? text(h2[1]) : ""; }
-    else if (h2) { title = text(h2[1]); summary = h3 ? text(h3[1]) : ""; }
-    else continue;
-    if (title.length < 20) continue;
-    seen.add(url);
-    articles.push({ source: "Gulf News", title, url, summary, imageUrl: img ? "https:" + img[1].split("?")[0] : "", publishedAt: new Date().toISOString() });
-  }
-  return articles;
-}
-
-async function scrapeKhaleejTimes() {
-  const res = await fetch("https://www.khaleejtimes.com/business/property", {
-    headers: { "User-Agent": UA, Accept: "text/html" },
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!res.ok) throw new Error(`Khaleej Times HTTP ${res.status}`);
-  const html = (await res.text()).replace(/&quot;/g, '"').replace(/&amp;/g, "&").replace(/&#x27;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
-  const headlineRe = /"headline":"([^"]{20,})"/g;
-  const urlRe = /"url":"(https:\/\/www\.khaleejtimes\.com\/business\/property\/[^"]+)"/g;
-  const imgRe = /"thumb_image":"([^"]+)"/g;
-  const tsRe  = /"first_published_at":(\d{13})/g;
-  const headlines = [], urls = [], images = [], timestamps = [];
-  let mm;
-  while ((mm = headlineRe.exec(html)) !== null) headlines.push({ pos: mm.index, val: mm[1] });
-  while ((mm = urlRe.exec(html)) !== null)      urls.push({ pos: mm.index, val: mm[1] });
-  while ((mm = imgRe.exec(html)) !== null)      images.push({ pos: mm.index, val: mm[1] });
-  while ((mm = tsRe.exec(html)) !== null)       timestamps.push({ pos: mm.index, val: Number(mm[1]) });
-  const nearest = (arr, pos) => arr.filter((x) => x.pos > pos).sort((a, b) => a.pos - b.pos)[0]?.val;
-  const articles = [];
-  const seen = new Set();
-  for (const h of headlines) {
-    const url = nearest(urls, h.pos);
-    if (!url || seen.has(url)) continue;
-    seen.add(url);
-    const ts = nearest(timestamps, h.pos);
-    articles.push({ source: "Khaleej Times", title: h.val, url, summary: "", imageUrl: (nearest(images, h.pos) ?? "").split("?")[0], publishedAt: ts ? new Date(ts).toISOString() : new Date().toISOString() });
-  }
-  return articles;
 }
 
 // ── Fetch all sources ─────────────────────────────────────────────────────────
@@ -195,14 +132,6 @@ async function fetchAll() {
       console.log(`[gnews] ${source}: ${feed.items?.length ?? 0} items`);
     } catch (e) { console.warn(`[gnews] ${source} failed:`, e.message); }
   }));
-
-  for (const [fn, label] of [[scrapeGulfNews, "Gulf News"], [scrapeKhaleejTimes, "Khaleej Times"]]) {
-    try {
-      const articles = await fn();
-      results.push(...articles);
-      console.log(`[scrape] ${label}: ${articles.length} articles`);
-    } catch (e) { console.warn(`[scrape] ${label} failed:`, e.message); }
-  }
 
   const RE_KEYWORDS = /real.?estate|property|properties|mortgage|rent|landlord|tenant|apartment|villa|residential|commercial|off.?plan|handover|developer|realty|housing|sqft|sq\.ft|dubai land|DLD|RERA|leasehold|freehold/i;
   const seen = new Set();
