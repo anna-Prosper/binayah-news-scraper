@@ -241,6 +241,64 @@ function resolveGNewsUrl(gnewsArticleUrl) {
   } catch { return null; }
 }
 
+// Resolve a GNews URL via Google's batchexecute RPC (same approach as
+// Python's googlenewsdecoder). No headless needed — single POST returns
+// the real publisher URL. Much faster than Puppeteer.
+async function resolveGNewsBatch(gnewsUrl) {
+  try {
+    const m = gnewsUrl.match(/articles\/([A-Za-z0-9_-]+)/);
+    if (!m) return null;
+    const articleId = m[1];
+
+    // 1. Fetch the article page to get signature + timestamp
+    const pageRes = await fetch(`https://news.google.com/articles/${articleId}`, {
+      headers: { "User-Agent": UA },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!pageRes.ok) return null;
+    const html = await pageRes.text();
+    const sig = html.match(/data-n-a-sg="([^"]+)"/)?.[1];
+    const ts  = html.match(/data-n-a-ts="(\d+)"/)?.[1];
+    if (!sig || !ts) return null;
+
+    // 2. POST to batchexecute
+    const inner = JSON.stringify(["garturlreq",
+      [["X","X",["X","X"],null,null,1,1,"US:en",null,1,null,null,null,null,null,0,1],"X","X",1,[9,1,1,1,1],1,0,"0",0,0,null,0],
+      sig, Number(ts), articleId]);
+    const payload = JSON.stringify([[["Fbv4je", inner, null, "generic"]]]);
+    const body = "f.req=" + encodeURIComponent(payload);
+
+    const res = await fetch("https://news.google.com/_/DotsSplashUi/data/batchexecute", {
+      method: "POST",
+      headers: {
+        "User-Agent": UA,
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+      },
+      body,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return null;
+    const text = await res.text();
+
+    // Response is `)]}'\n<json>` — the inner payload is a JSON-string containing the real URL
+    const jsonStart = text.indexOf("[");
+    if (jsonStart < 0) return null;
+    const outer = JSON.parse(text.slice(jsonStart));
+    for (const row of outer) {
+      if (!Array.isArray(row)) continue;
+      for (const cell of row) {
+        if (typeof cell === "string" && cell.startsWith("[\"garturlres\"")) {
+          const parsed = JSON.parse(cell);
+          if (parsed[1] && typeof parsed[1] === "string" && parsed[1].startsWith("http")) {
+            return parsed[1];
+          }
+        }
+      }
+    }
+    return null;
+  } catch { return null; }
+}
+
 // Resolve a GNews URL to the real article URL using headless.
 // GNews serves a short HTML page with a JS redirect to the publisher — we wait
 // for that navigation (up to 25s total) rather than domcontentloaded, which
@@ -345,24 +403,45 @@ async function enrichWithImages(articles) {
     let dirty = false;
     const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
-    // Step 1: Resolve unresolved GNews URLs — base64 decode first, headless fallback
+    // Step 1: Resolve unresolved GNews URLs — batchexecute RPC (fast), then
+    // base64 decode, then headless as last resort. Up to 100 per cycle since
+    // batchexecute is cheap.
     const unresolvedGNews = articles
       .filter((a) => a.gnewsUrl && a.url.includes("news.google.com") && new Date(a.publishedAt).getTime() > sevenDaysAgo)
-      .slice(0, 30);
+      .slice(0, 100);
     if (unresolvedGNews.length) {
       console.log(`[urls] resolving ${unresolvedGNews.length} GNews URLs...`);
-      let resolved = 0;
-      for (const a of unresolvedGNews) {
-        let realUrl = resolveGNewsUrl(a.gnewsUrl);
-        if (!realUrl) realUrl = await resolveGNewsHeadless(a.gnewsUrl);
+      let resolved = 0, viaBatch = 0, viaB64 = 0, viaHeadless = 0;
+      // Parallelize batchexecute 8 at a time (Google tolerates this; faster than serial)
+      for (let i = 0; i < unresolvedGNews.length; i += 8) {
+        await Promise.allSettled(unresolvedGNews.slice(i, i + 8).map(async (a) => {
+          let realUrl = await resolveGNewsBatch(a.gnewsUrl);
+          if (realUrl) { viaBatch++; }
+          else {
+            realUrl = resolveGNewsUrl(a.gnewsUrl);
+            if (realUrl) viaB64++;
+          }
+          if (realUrl) {
+            queueUrl(a.gnewsUrl, realUrl);
+            a.url = realUrl;
+            if (imageCache[realUrl]) a.imageUrl = imageCache[realUrl];
+            resolved++;
+          }
+        }));
+        await flushCaches();
+      }
+      // Headless last-resort for any still-unresolved recent articles (capped)
+      const stillUnresolved = unresolvedGNews.filter((a) => a.url.includes("news.google.com")).slice(0, 10);
+      for (const a of stillUnresolved) {
+        const realUrl = await resolveGNewsHeadless(a.gnewsUrl);
         if (realUrl) {
           queueUrl(a.gnewsUrl, realUrl);
           a.url = realUrl;
           if (imageCache[realUrl]) a.imageUrl = imageCache[realUrl];
-          resolved++;
+          resolved++; viaHeadless++;
         }
       }
-      console.log(`[urls] resolved ${resolved}/${unresolvedGNews.length}`);
+      console.log(`[urls] resolved ${resolved}/${unresolvedGNews.length} (batch:${viaBatch} b64:${viaB64} headless:${viaHeadless})`);
       await _browser?.close().catch(() => {}); _browser = null;
       await flushCaches();
     }
