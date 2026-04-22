@@ -233,6 +233,7 @@ async function getBrowser() {
       "--disable-gpu",
       "--no-first-run",
       "--no-zygote",
+      "--single-process",
     ],
   });
   browser.on("disconnected", () => { browser = null; });
@@ -251,7 +252,8 @@ async function fetchOgImageHeadless(url) {
       return m ? m.getAttribute("content") || "" : "";
     });
     return img.startsWith("http") ? img : "";
-  } catch {
+  } catch (e) {
+    console.warn("[headless] error:", e.message?.slice(0, 120));
     return "";
   } finally {
     await page?.close().catch(() => {});
