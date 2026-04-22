@@ -133,8 +133,8 @@ async function fetchAll() {
       const feed = await parser.parseURL(gnewsUrl(q));
       for (const item of feed.items ?? []) {
         if (!item.title || !item.link) continue;
-        // Use cached real URL if we've resolved this GNews link before
-        const realUrl = urlCache[item.link] || item.link;
+        // Decode GNews URL at ingest — cache hit first, then base64 decode, else keep redirect URL
+        const realUrl = urlCache[item.link] || resolveGNewsUrl(item.link) || item.link;
         results.push({ source, title: item.title.trim(), url: realUrl, gnewsUrl: item.link, summary: "", imageUrl: imageCache[realUrl] || "", body: bodyCache[realUrl] || "", publishedAt: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString() });
       }
       console.log(`[gnews] ${source}: ${feed.items?.length ?? 0} items`);
@@ -182,14 +182,22 @@ async function withPage(fn) {
   }
 }
 
-// Resolve a GNews redirect URL to the real article URL using headless
-async function resolveGNewsUrl(gnewsArticleUrl) {
-  return withPage(async (page) => {
-    await page.setDefaultNavigationTimeout(15_000);
-    await page.goto(gnewsArticleUrl, { waitUntil: "domcontentloaded" });
-    const finalUrl = page.url();
-    return !finalUrl.includes("news.google.com") ? finalUrl : null;
-  });
+// Resolve a GNews redirect URL to the real article URL.
+// GNews embeds the target URL in the base64-encoded article path (protobuf field).
+// We decode it directly — no HTTP request, no headless browser.
+function resolveGNewsUrl(gnewsArticleUrl) {
+  try {
+    const match = gnewsArticleUrl.match(/articles\/([A-Za-z0-9_-]+)/);
+    if (!match) return null;
+    const buf = Buffer.from(match[1].replace(/-/g, "+").replace(/_/g, "/"), "base64");
+    const str = buf.toString("binary");
+    const idx = str.indexOf("https://");
+    if (idx === -1) return null;
+    let end = str.indexOf("\x00", idx);
+    if (end === -1) end = str.length;
+    const url = str.slice(idx, end).replace(/[\x00-\x1f]/g, "");
+    return url.startsWith("http") ? url : null;
+  } catch { return null; }
 }
 
 // Get og:image from a URL using headless (for Cloudflare-protected domains)
@@ -269,7 +277,7 @@ async function enrichWithImages(articles) {
     let dirty = false;
     const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
-    // Step 1: Resolve unresolved GNews URLs (headless, 50 per cycle, recent only)
+    // Step 1: Resolve unresolved GNews URLs (base64 decode — no headless needed)
     const unresolvedGNews = articles
       .filter((a) => a.gnewsUrl && a.url.includes("news.google.com") && new Date(a.publishedAt).getTime() > sevenDaysAgo)
       .slice(0, 50);
@@ -277,7 +285,7 @@ async function enrichWithImages(articles) {
       console.log(`[urls] resolving ${unresolvedGNews.length} GNews URLs...`);
       let resolved = 0;
       for (const a of unresolvedGNews) {
-        const realUrl = await resolveGNewsUrl(a.gnewsUrl);
+        const realUrl = resolveGNewsUrl(a.gnewsUrl);
         if (realUrl) {
           urlCache[a.gnewsUrl] = realUrl;
           a.url = realUrl;
