@@ -215,8 +215,10 @@ async function fetchOgImage(url) {
       html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
       html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
     const img = m?.[1] || "";
-    // Skip data URIs and tiny placeholders
-    return img.startsWith("http") ? img : "";
+    // Skip data URIs, Google icon CDN (GE logo placeholder), and non-http
+    if (!img.startsWith("http")) return "";
+    if (img.includes("lh3.googleusercontent.com")) return "";
+    return img;
   } catch {
     return "";
   }
@@ -295,15 +297,22 @@ async function enrichWithImages(articles) {
 
 let cache = { data: null, fetchedAt: 0 };
 
+// Strip any Google-logo placeholder images that slipped in on previous runs
+function stripBadImages(articles) {
+  for (const a of articles) {
+    if (a.imageUrl?.includes("lh3.googleusercontent.com")) a.imageUrl = "";
+  }
+}
+
 async function getNews(limit = 50) {
   if (!cache.data || Date.now() - cache.fetchedAt > CACHE_TTL_MS) {
     console.log("[cache] refreshing...");
     cache.data = await fetchAll();
     cache.fetchedAt = Date.now();
     console.log(`[cache] ${cache.data.length} articles cached`);
-    // Enrich images in background — cache is immediately available
     enrichWithImages(cache.data).catch((e) => console.warn("[images] enrich failed:", e.message));
   }
+  stripBadImages(cache.data);
   return cache.data.slice(0, limit);
 }
 
