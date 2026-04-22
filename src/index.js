@@ -179,10 +179,20 @@ async function fetchAll() {
     }
   }
 
-  // Sort newest first, dedupe by URL
+  const RE_KEYWORDS = /real.?estate|property|properties|mortgage|rent|landlord|tenant|apartment|villa|residential|commercial|off.?plan|handover|developer|realty|housing|sqft|sq\.ft|dubai land|DLD|RERA|leasehold|freehold/i;
+  const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - ONE_WEEK_MS;
+
+  // Filter to real estate articles published within the last 7 days, dedupe by URL
   const seen = new Set();
   return results
-    .filter((a) => { if (seen.has(a.url)) return false; seen.add(a.url); return true; })
+    .filter((a) => {
+      if (seen.has(a.url)) return false;
+      seen.add(a.url);
+      const age = new Date(a.publishedAt).getTime();
+      if (age < cutoff) return false;
+      return RE_KEYWORDS.test(a.title) || RE_KEYWORDS.test(a.summary || "");
+    })
     .sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
 }
 
@@ -218,7 +228,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "GET" && url.pathname === "/news") {
     try {
-      const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50"), 200);
+      const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50"), 1000);
       const source = url.searchParams.get("source");
       let articles = await getNews(200);
       if (source) articles = articles.filter((a) => a.source.toLowerCase().includes(source.toLowerCase()));

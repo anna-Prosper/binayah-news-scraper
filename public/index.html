@@ -73,14 +73,12 @@
   /* ── Source filter strip ── */
   #filters {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     padding: 14px 32px;
-    overflow-x: auto;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
-    scrollbar-width: none;
   }
-  #filters::-webkit-scrollbar { display: none; }
   .filter-btn {
     flex-shrink: 0;
     background: transparent;
@@ -231,7 +229,7 @@
 </main>
 
 <script>
-const API = "https://binayah-news-scraper.onrender.com/news?limit=200";
+const API = "https://binayah-news-scraper.onrender.com/news?limit=1000";
 
 let allArticles = [];
 let activeSource = "all";
