@@ -1,11 +1,15 @@
 import http from "http";
 import crypto from "crypto";
 import RssParser from "rss-parser";
-import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { MongoClient } from "mongodb";
 import chromium from "@sparticuz/chromium";
-import puppeteer from "puppeteer-extra";
+import puppeteerCore from "puppeteer-core";
+import { addExtra } from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 
+// Wire puppeteer-extra to puppeteer-core explicitly (no vanilla puppeteer installed)
+const puppeteer = addExtra(puppeteerCore);
 puppeteer.use(StealthPlugin());
 chromium.setHeadlessMode = true;
 chromium.setGraphicsMode = false;
@@ -15,7 +19,7 @@ const CACHE_TTL_MS = 30 * 60 * 1000;
 const UA = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
 const parser = new RssParser({ timeout: 12_000, headers: { "User-Agent": UA } });
 
-// ── S3 ────────────────────────────────────────────────────────────────────────
+// ── S3 (images only) ─────────────────────────────────────────────────────────
 
 const s3 = new S3Client({
   region: process.env.AWS_REGION || "us-east-1",
@@ -26,45 +30,69 @@ const s3 = new S3Client({
 });
 const BUCKET = process.env.AWS_S3_BUCKET || "binayah-media-456051253184-us-east-1-an";
 
-async function s3Get(key) {
-  try {
-    const res = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
-    return JSON.parse(await res.Body.transformToString());
-  } catch { return null; }
-}
+// ── MongoDB caches ───────────────────────────────────────────────────────────
+// Keyed lookups persist across restarts in `news_scraper` DB (shared cluster).
+// Collections:  url_cache { _id: gnewsUrl, url }
+//              image_cache { _id: articleUrl, imageUrl }
+//              body_cache  { _id: articleUrl, body }
 
-async function s3Put(key, data) {
-  try {
-    await s3.send(new PutObjectCommand({
-      Bucket: BUCKET, Key: key,
-      Body: JSON.stringify(data),
-      ContentType: "application/json",
-    }));
-  } catch (e) { console.warn("[s3] put failed:", e.message); }
-}
+const MONGODB_URI = process.env.MONGODB_URI;
+let mongoClient = null;
+let urlCol, imageCol, bodyCol;
 
 let urlCache   = {}; // gnewsUrl → real article URL
-let imageCache = {}; // real article URL → S3 image URL
+let imageCache = {}; // real article URL → image URL (S3 or original)
 let bodyCache  = {}; // real article URL → article body text (≤1500 chars)
 
+// Writes queued between flushes to avoid hammering Mongo per enrichment step.
+const pendingWrites = { url: new Map(), image: new Map(), body: new Map() };
+
 async function loadCaches() {
-  const [u, i, b] = await Promise.all([
-    s3Get("news/url-cache.json"),
-    s3Get("news/image-cache.json"),
-    s3Get("news/body-cache.json"),
+  if (!MONGODB_URI) {
+    console.warn("[mongo] MONGODB_URI not set — caches will not persist");
+    return;
+  }
+  mongoClient = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 8000 });
+  await mongoClient.connect();
+  const db = mongoClient.db("news_scraper");
+  urlCol   = db.collection("url_cache");
+  imageCol = db.collection("image_cache");
+  bodyCol  = db.collection("body_cache");
+
+  const [urls, images, bodies] = await Promise.all([
+    urlCol.find({}, { projection: { _id: 1, url: 1 } }).toArray(),
+    imageCol.find({}, { projection: { _id: 1, imageUrl: 1 } }).toArray(),
+    bodyCol.find({}, { projection: { _id: 1, body: 1 } }).toArray(),
   ]);
-  urlCache   = u || {};
-  imageCache = i || {};
-  bodyCache  = b || {};
-  console.log(`[s3] url-cache: ${Object.keys(urlCache).length}, image-cache: ${Object.keys(imageCache).length}, body-cache: ${Object.keys(bodyCache).length}`);
+  for (const r of urls)   urlCache[r._id]   = r.url;
+  for (const r of images) imageCache[r._id] = r.imageUrl;
+  for (const r of bodies) bodyCache[r._id]  = r.body;
+  console.log(`[mongo] url-cache: ${urls.length}, image-cache: ${images.length}, body-cache: ${bodies.length}`);
 }
 
-async function saveCaches() {
-  await Promise.all([
-    s3Put("news/url-cache.json", urlCache),
-    s3Put("news/image-cache.json", imageCache),
-    s3Put("news/body-cache.json", bodyCache),
-  ]);
+function queueUrl(k, v)   { urlCache[k]   = v; pendingWrites.url.set(k, v); }
+function queueImage(k, v) { imageCache[k] = v; pendingWrites.image.set(k, v); }
+function queueBody(k, v)  { bodyCache[k]  = v; pendingWrites.body.set(k, v); }
+
+async function flushCaches() {
+  if (!mongoClient) return;
+  const tasks = [];
+  if (pendingWrites.url.size) {
+    const ops = [...pendingWrites.url].map(([k, v]) => ({ updateOne: { filter: { _id: k }, update: { $set: { url: v } }, upsert: true } }));
+    pendingWrites.url.clear();
+    tasks.push(urlCol.bulkWrite(ops, { ordered: false }).catch((e) => console.warn("[mongo] url flush:", e.message)));
+  }
+  if (pendingWrites.image.size) {
+    const ops = [...pendingWrites.image].map(([k, v]) => ({ updateOne: { filter: { _id: k }, update: { $set: { imageUrl: v } }, upsert: true } }));
+    pendingWrites.image.clear();
+    tasks.push(imageCol.bulkWrite(ops, { ordered: false }).catch((e) => console.warn("[mongo] image flush:", e.message)));
+  }
+  if (pendingWrites.body.size) {
+    const ops = [...pendingWrites.body].map(([k, v]) => ({ updateOne: { filter: { _id: k }, update: { $set: { body: v } }, upsert: true } }));
+    pendingWrites.body.clear();
+    tasks.push(bodyCol.bulkWrite(ops, { ordered: false }).catch((e) => console.warn("[mongo] body flush:", e.message)));
+  }
+  await Promise.all(tasks);
 }
 
 async function uploadImage(ogUrl, articleUrl) {
@@ -308,15 +336,15 @@ async function enrichWithImages(articles) {
         let realUrl = resolveGNewsUrl(a.gnewsUrl);
         if (!realUrl) realUrl = await resolveGNewsHeadless(a.gnewsUrl);
         if (realUrl) {
-          urlCache[a.gnewsUrl] = realUrl;
+          queueUrl(a.gnewsUrl, realUrl);
           a.url = realUrl;
           if (imageCache[realUrl]) a.imageUrl = imageCache[realUrl];
-          dirty = true;
           resolved++;
         }
       }
       console.log(`[urls] resolved ${resolved}/${unresolvedGNews.length}`);
       await _browser?.close().catch(() => {}); _browser = null;
+      await flushCaches();
     }
 
     // Step 2: Fetch page data (image + body) for all open-access articles in one request
@@ -334,17 +362,17 @@ async function enrichWithImages(articles) {
           if (imageUrl && !a.imageUrl) {
             const s3Url = await uploadImage(imageUrl, a.url);
             a.imageUrl = s3Url || imageUrl;
-            imageCache[a.url] = a.imageUrl;
-            dirty = true;
+            queueImage(a.url, a.imageUrl);
             imgCount++;
           }
           if (body && !a.body) {
             a.body = body;
-            bodyCache[a.url] = body;
-            dirty = true;
+            queueBody(a.url, body);
             bodyCount++;
           }
         }));
+        // Flush every batch so progress is durable even if the process dies mid-run.
+        await flushCaches();
       }
       console.log(`[enrich] fast done — images: ${imgCount}, bodies: ${bodyCount}/${fast.length}`);
     }
@@ -361,15 +389,13 @@ async function enrichWithImages(articles) {
         if (!ogUrl) continue;
         const s3Url = await uploadImage(ogUrl, a.url);
         a.imageUrl = s3Url || ogUrl;
-        imageCache[a.url] = a.imageUrl;
-        dirty = true;
+        queueImage(a.url, a.imageUrl);
         enriched++;
       }
       console.log(`[images] headless enriched ${enriched}/${slow.length}`);
       await _browser?.close().catch(() => {}); _browser = null;
+      await flushCaches();
     }
-
-    if (dirty) await saveCaches();
   } finally {
     enrichmentRunning = false;
   }
