@@ -8,6 +8,7 @@
     "dev": "node --watch src/index.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1034.0",
     "@sparticuz/chromium": "^147.0.0",
     "puppeteer-core": "^24.42.0",
     "puppeteer-extra": "^3.3.6",
