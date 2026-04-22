@@ -180,8 +180,8 @@ async function fetchAll() {
   }
 
   const RE_KEYWORDS = /real.?estate|property|properties|mortgage|rent|landlord|tenant|apartment|villa|residential|commercial|off.?plan|handover|developer|realty|housing|sqft|sq\.ft|dubai land|DLD|RERA|leasehold|freehold/i;
-  const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-  const cutoff = Date.now() - ONE_WEEK_MS;
+  const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - THIRTY_DAYS_MS;
 
   // Filter to real estate articles published within the last 7 days, dedupe by URL
   const seen = new Set();
@@ -222,15 +222,17 @@ const server = http.createServer(async (req, res) => {
   res.setHeader("Content-Type", "application/json");
 
   if (req.method === "GET" && url.pathname === "/health") {
+    const bySource = {};
+    for (const a of cache.data ?? []) bySource[a.source] = (bySource[a.source] ?? 0) + 1;
     res.writeHead(200);
-    return res.end(JSON.stringify({ ok: true, cached: !!cache.data, articles: cache.data?.length ?? 0 }));
+    return res.end(JSON.stringify({ ok: true, cached: !!cache.data, articles: cache.data?.length ?? 0, fetchedAt: cache.fetchedAt ? new Date(cache.fetchedAt).toISOString() : null, bySource }));
   }
 
   if (req.method === "GET" && url.pathname === "/news") {
     try {
       const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50"), 1000);
       const source = url.searchParams.get("source");
-      let articles = await getNews(200);
+      let articles = await getNews(1000);
       if (source) articles = articles.filter((a) => a.source.toLowerCase().includes(source.toLowerCase()));
       res.writeHead(200);
       return res.end(JSON.stringify({ ok: true, count: articles.slice(0, limit).length, fetchedAt: new Date(cache.fetchedAt).toISOString(), articles: articles.slice(0, limit) }));
