@@ -299,17 +299,50 @@ async function resolveGNewsBatch(gnewsUrl) {
   } catch { return null; }
 }
 
-// Resolve a GNews URL to the real article URL using headless.
-// GNews serves a short HTML page with a JS redirect to the publisher — we wait
-// for that navigation (up to 25s total) rather than domcontentloaded, which
-// fires before the redirect.
+// Tier 2: Headless click — render the GNews article page, find the publisher
+// <a href> in the DOM, return it (or click + wait for navigation).
+async function resolveGNewsClick(gnewsUrl) {
+  return withPage(async (page) => {
+    await page.setDefaultNavigationTimeout(20_000);
+    try {
+      await page.goto(gnewsUrl, { waitUntil: "networkidle2", timeout: 20_000 });
+    } catch { /* partial load is fine if DOM has the link */ }
+
+    // Maybe already redirected
+    let u = page.url();
+    if (!u.includes("news.google.com")) return u;
+
+    // Grab any external publisher link from the DOM
+    const href = await page.evaluate(() => {
+      const skip = ["google.", "youtube.", "gstatic.", "googleapis."];
+      for (const a of document.querySelectorAll('a[href^="http"]')) {
+        const h = a.href;
+        if (!skip.some((d) => h.includes(d))) return h;
+      }
+      return null;
+    }).catch(() => null);
+    if (href) return href;
+
+    // Fallback: click a main-area link and wait for navigation
+    try {
+      await Promise.all([
+        page.waitForNavigation({ timeout: 8_000 }).catch(() => {}),
+        page.click('c-wiz a, article a, main a').catch(() => {}),
+      ]);
+      u = page.url();
+      if (!u.includes("news.google.com")) return u;
+    } catch {}
+    return null;
+  });
+}
+
+// Tier 3: Navigate + poll — last resort for when click tier also fails
 async function resolveGNewsHeadless(gnewsUrl) {
   return withPage(async (page) => {
     await page.setDefaultNavigationTimeout(25_000);
     try {
       await page.goto(gnewsUrl, { waitUntil: "domcontentloaded" });
-    } catch { /* initial navigation timed out — still check current URL */ }
-    // Poll for redirect up to 8s
+    } catch { /* still check current URL below */ }
     for (let i = 0; i < 16; i++) {
       const u = page.url();
       if (!u.includes("news.google.com")) return u;
@@ -403,36 +436,47 @@ async function enrichWithImages(articles) {
     let dirty = false;
     const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
-    // Step 1: Resolve unresolved GNews URLs — batchexecute RPC (fast), then
-    // base64 decode, then headless as last resort. Up to 100 per cycle since
-    // batchexecute is cheap.
+    // Step 1: Resolve unresolved GNews URLs in three tiers —
+    //   (1) batchexecute RPC (fast, no browser, 8-way parallel)
+    //   (2) headless + find publisher link in DOM (click tier)
+    //   (3) headless + poll page.url() for JS redirect (last resort)
+    // Base64 decode is a free pre-check for older URL formats.
     const unresolvedGNews = articles
       .filter((a) => a.gnewsUrl && a.url.includes("news.google.com") && new Date(a.publishedAt).getTime() > sevenDaysAgo)
       .slice(0, 100);
     if (unresolvedGNews.length) {
       console.log(`[urls] resolving ${unresolvedGNews.length} GNews URLs...`);
-      let resolved = 0, viaBatch = 0, viaB64 = 0, viaHeadless = 0;
-      // Parallelize batchexecute 8 at a time (Google tolerates this; faster than serial)
+      let resolved = 0, viaBatch = 0, viaB64 = 0, viaClick = 0, viaHeadless = 0;
+
+      // Tier 1: batchexecute (parallel batches of 8)
       for (let i = 0; i < unresolvedGNews.length; i += 8) {
         await Promise.allSettled(unresolvedGNews.slice(i, i + 8).map(async (a) => {
-          let realUrl = await resolveGNewsBatch(a.gnewsUrl);
-          if (realUrl) { viaBatch++; }
-          else {
-            realUrl = resolveGNewsUrl(a.gnewsUrl);
-            if (realUrl) viaB64++;
-          }
-          if (realUrl) {
-            queueUrl(a.gnewsUrl, realUrl);
-            a.url = realUrl;
-            if (imageCache[realUrl]) a.imageUrl = imageCache[realUrl];
-            resolved++;
-          }
+          const realUrl = (await resolveGNewsBatch(a.gnewsUrl)) || resolveGNewsUrl(a.gnewsUrl);
+          if (!realUrl) return;
+          if (realUrl !== resolveGNewsUrl(a.gnewsUrl)) viaBatch++; else viaB64++;
+          queueUrl(a.gnewsUrl, realUrl);
+          a.url = realUrl;
+          if (imageCache[realUrl]) a.imageUrl = imageCache[realUrl];
+          resolved++;
         }));
         await flushCaches();
       }
-      // Headless last-resort for any still-unresolved recent articles (capped)
-      const stillUnresolved = unresolvedGNews.filter((a) => a.url.includes("news.google.com")).slice(0, 10);
-      for (const a of stillUnresolved) {
+
+      // Tier 2: click — for any still unresolved recent articles (capped — each takes ~20s)
+      const stillUnresolved2 = unresolvedGNews.filter((a) => a.url.includes("news.google.com")).slice(0, 15);
+      for (const a of stillUnresolved2) {
+        const realUrl = await resolveGNewsClick(a.gnewsUrl);
+        if (realUrl) {
+          queueUrl(a.gnewsUrl, realUrl);
+          a.url = realUrl;
+          if (imageCache[realUrl]) a.imageUrl = imageCache[realUrl];
+          resolved++; viaClick++;
+        }
+      }
+
+      // Tier 3: poll — absolute last resort
+      const stillUnresolved3 = unresolvedGNews.filter((a) => a.url.includes("news.google.com")).slice(0, 5);
+      for (const a of stillUnresolved3) {
         const realUrl = await resolveGNewsHeadless(a.gnewsUrl);
         if (realUrl) {
           queueUrl(a.gnewsUrl, realUrl);
@@ -441,7 +485,8 @@ async function enrichWithImages(articles) {
           resolved++; viaHeadless++;
         }
       }
-      console.log(`[urls] resolved ${resolved}/${unresolvedGNews.length} (batch:${viaBatch} b64:${viaB64} headless:${viaHeadless})`);
+
+      console.log(`[urls] resolved ${resolved}/${unresolvedGNews.length} (batch:${viaBatch} b64:${viaB64} click:${viaClick} headless:${viaHeadless})`);
       await _browser?.close().catch(() => {}); _browser = null;
       await flushCaches();
     }
