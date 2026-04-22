@@ -54,10 +54,12 @@ async function loadCaches() {
   }
   mongoClient = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 8000 });
   await mongoClient.connect();
-  const db = mongoClient.db("news_scraper");
-  urlCol   = db.collection("url_cache");
-  imageCol = db.collection("image_cache");
-  bodyCol  = db.collection("body_cache");
+  // Use the default DB the user has permissions for (binayah_web_new_dev).
+  // Collection names prefixed to namespace scraper caches.
+  const db = mongoClient.db();
+  urlCol   = db.collection("newsScraper_urlCache");
+  imageCol = db.collection("newsScraper_imageCache");
+  bodyCol  = db.collection("newsScraper_bodyCache");
 
   const [urls, images, bodies] = await Promise.all([
     urlCol.find({}, { projection: { _id: 1, url: 1 } }).toArray(),
