@@ -214,73 +214,79 @@ async function ogImageFetch(url) {
 // ── Enrichment pipeline ───────────────────────────────────────────────────────
 
 const HEADLESS_DOMAINS = ["arabianbusiness.com", "reuters.com", "constructionweekonline.com"];
+let enrichmentRunning = false;
 
 async function enrichWithImages(articles) {
-  let dirty = false;
+  if (enrichmentRunning) return;
+  enrichmentRunning = true;
+  try {
+    let dirty = false;
+    const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
-  const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-
-  // Step 1: Resolve unresolved GNews URLs (headless, 10 per cycle, recent only)
-  const unresolvedGNews = articles
-    .filter((a) => a.gnewsUrl && a.url.includes("news.google.com") && new Date(a.publishedAt).getTime() > sevenDaysAgo)
-    .slice(0, 10);
-  if (unresolvedGNews.length) {
-    console.log(`[urls] resolving ${unresolvedGNews.length} GNews URLs...`);
-    let resolved = 0;
-    for (const a of unresolvedGNews) {
-      const realUrl = await resolveGNewsUrl(a.gnewsUrl);
-      if (realUrl) {
-        urlCache[a.gnewsUrl] = realUrl;
-        a.url = realUrl;
-        if (imageCache[realUrl]) a.imageUrl = imageCache[realUrl];
-        dirty = true;
-        resolved++;
+    // Step 1: Resolve unresolved GNews URLs (headless, 50 per cycle, recent only)
+    const unresolvedGNews = articles
+      .filter((a) => a.gnewsUrl && a.url.includes("news.google.com") && new Date(a.publishedAt).getTime() > sevenDaysAgo)
+      .slice(0, 50);
+    if (unresolvedGNews.length) {
+      console.log(`[urls] resolving ${unresolvedGNews.length} GNews URLs...`);
+      let resolved = 0;
+      for (const a of unresolvedGNews) {
+        const realUrl = await resolveGNewsUrl(a.gnewsUrl);
+        if (realUrl) {
+          urlCache[a.gnewsUrl] = realUrl;
+          a.url = realUrl;
+          if (imageCache[realUrl]) a.imageUrl = imageCache[realUrl];
+          dirty = true;
+          resolved++;
+        }
       }
+      console.log(`[urls] resolved ${resolved}/${unresolvedGNews.length}`);
+      await _browser?.close().catch(() => {}); _browser = null;
     }
-    console.log(`[urls] resolved ${resolved}/${unresolvedGNews.length}`);
-    await _browser?.close().catch(() => {}); _browser = null;
-  }
 
-  // Step 2: Fast HTTP og:image for non-blocked, non-GNews articles
-  const fast = articles.filter((a) => !a.imageUrl && !a.url.includes("news.google.com") && !HEADLESS_DOMAINS.some((d) => a.url.includes(d))).slice(0, 200);
-  if (fast.length) {
-    console.log(`[images] fast: ${fast.length} articles...`);
-    let enriched = 0;
-    for (let i = 0; i < fast.length; i += 6) {
-      await Promise.allSettled(fast.slice(i, i + 6).map(async (a) => {
-        const ogUrl = await ogImageFetch(a.url);
-        if (!ogUrl) return;
+    // Step 2: Fast HTTP og:image for all non-blocked, non-GNews articles (no cap)
+    const fast = articles.filter((a) => !a.imageUrl && !a.url.includes("news.google.com") && !HEADLESS_DOMAINS.some((d) => a.url.includes(d)));
+    if (fast.length) {
+      console.log(`[images] fast: ${fast.length} articles...`);
+      let enriched = 0;
+      for (let i = 0; i < fast.length; i += 8) {
+        await Promise.allSettled(fast.slice(i, i + 8).map(async (a) => {
+          const ogUrl = await ogImageFetch(a.url);
+          if (!ogUrl) return;
+          const s3Url = await uploadImage(ogUrl, a.url);
+          a.imageUrl = s3Url || ogUrl;
+          imageCache[a.url] = a.imageUrl;
+          dirty = true;
+          enriched++;
+        }));
+      }
+      console.log(`[images] fast enriched ${enriched}/${fast.length}`);
+    }
+
+    // Step 3: Headless og:image for Cloudflare-protected domains, recent only
+    const slow = articles
+      .filter((a) => !a.imageUrl && HEADLESS_DOMAINS.some((d) => a.url.includes(d)) && new Date(a.publishedAt).getTime() > sevenDaysAgo)
+      .slice(0, 20);
+    if (slow.length) {
+      console.log(`[images] headless: ${slow.length} articles...`);
+      let enriched = 0;
+      for (const a of slow) {
+        const ogUrl = await ogImageHeadless(a.url);
+        if (!ogUrl) continue;
         const s3Url = await uploadImage(ogUrl, a.url);
         a.imageUrl = s3Url || ogUrl;
         imageCache[a.url] = a.imageUrl;
         dirty = true;
         enriched++;
-      }));
+      }
+      console.log(`[images] headless enriched ${enriched}/${slow.length}`);
+      await _browser?.close().catch(() => {}); _browser = null;
     }
-    console.log(`[images] fast enriched ${enriched}/${fast.length}`);
-  }
 
-  // Step 3: Headless og:image for Cloudflare-protected domains (AB, Reuters etc.), recent only
-  const slow = articles
-    .filter((a) => !a.imageUrl && HEADLESS_DOMAINS.some((d) => a.url.includes(d)) && new Date(a.publishedAt).getTime() > sevenDaysAgo)
-    .slice(0, 15);
-  if (slow.length) {
-    console.log(`[images] headless: ${slow.length} articles...`);
-    let enriched = 0;
-    for (const a of slow) {
-      const ogUrl = await ogImageHeadless(a.url);
-      if (!ogUrl) continue;
-      const s3Url = await uploadImage(ogUrl, a.url);
-      a.imageUrl = s3Url || ogUrl;
-      imageCache[a.url] = a.imageUrl;
-      dirty = true;
-      enriched++;
-    }
-    console.log(`[images] headless enriched ${enriched}/${slow.length}`);
-    await _browser?.close().catch(() => {}); _browser = null;
+    if (dirty) await saveCaches();
+  } finally {
+    enrichmentRunning = false;
   }
-
-  if (dirty) await saveCaches();
 }
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
@@ -297,6 +303,13 @@ async function getNews(limit = 50) {
   }
   return cache.data.slice(0, limit);
 }
+
+// Run enrichment every 5 min so images fill in continuously between cache refreshes
+setInterval(() => {
+  if (cache.data?.length) {
+    enrichWithImages(cache.data).catch((e) => console.warn("[enrich] interval failed:", e.message));
+  }
+}, 5 * 60 * 1000);
 
 loadCaches()
   .then(() => getNews())
