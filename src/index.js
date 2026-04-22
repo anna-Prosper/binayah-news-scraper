@@ -54,9 +54,9 @@ async function loadCaches() {
   }
   mongoClient = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 8000 });
   await mongoClient.connect();
-  // Use the default DB the user has permissions for (binayah_web_new_dev).
-  // Collection names prefixed to namespace scraper caches.
-  const db = mongoClient.db();
+  // Dedicated DB for scraper state — separate from app data.
+  // DB name can be overridden via MONGODB_DB; defaults to binayah_migration.
+  const db = mongoClient.db(process.env.MONGODB_DB || "binayah_migration");
   urlCol   = db.collection("newsScraper_urlCache");
   imageCol = db.collection("newsScraper_imageCache");
   bodyCol  = db.collection("newsScraper_bodyCache");
