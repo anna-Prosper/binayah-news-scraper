@@ -1,8 +1,5 @@
 import http from "http";
 import RssParser from "rss-parser";
-import puppeteerCore from "puppeteer-core";
-import puppeteer from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
 
 const PORT = process.env.PORT || 3001;
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 min
@@ -10,22 +7,6 @@ const CACHE_TTL_MS = 30 * 60 * 1000; // 30 min
 const UA = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
 const parser = new RssParser({ timeout: 12_000, headers: { "User-Agent": UA } });
 
-puppeteer.use(StealthPlugin());
-
-// Chrome paths: Render installs system Chrome via render.yaml build command
-const CHROME_PATHS = [
-  "/usr/bin/google-chrome-stable",
-  "/usr/bin/google-chrome",
-  "/usr/bin/chromium-browser",
-  "/usr/bin/chromium",
-];
-async function findChrome() {
-  const { access } = await import("fs/promises");
-  for (const p of CHROME_PATHS) {
-    try { await access(p); return p; } catch {}
-  }
-  return null;
-}
 
 // ── RSS sources ──────────────────────────────────────────────────────────────
 
@@ -234,85 +215,26 @@ async function fetchOgImage(url) {
   }
 }
 
-// Domains that need a headless browser to bypass Cloudflare JS challenges
-const HEADLESS_DOMAINS = ["arabianbusiness.com", "reuters.com", "constructionweekonline.com"];
-
-let browser = null;
-async function getBrowser() {
-  if (browser && browser.connected) return browser;
-  const executablePath = await findChrome();
-  if (!executablePath) throw new Error("No Chrome found on this host");
-  const launcher = puppeteer.use ? puppeteer : puppeteerCore;
-  browser = await launcher.launch({
-    executablePath,
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--no-first-run",
-      "--no-zygote",
-      "--single-process",
-    ],
-  });
-  browser.on("disconnected", () => { browser = null; });
-  return browser;
-}
-
-async function fetchOgImageHeadless(url) {
-  let page;
-  try {
-    const b = await getBrowser();
-    page = await b.newPage();
-    await page.setDefaultNavigationTimeout(15_000);
-    await page.goto(url, { waitUntil: "domcontentloaded" });
-    const img = await page.evaluate(() => {
-      const m = document.querySelector('meta[property="og:image"]');
-      return m ? m.getAttribute("content") || "" : "";
-    });
-    return img.startsWith("http") ? img : "";
-  } catch (e) {
-    console.warn("[headless] error:", e.message?.slice(0, 120));
-    return "";
-  } finally {
-    await page?.close().catch(() => {});
-  }
-}
+// Domains that block plain HTTP fetching (Cloudflare JS challenges)
+const SKIP_ENRICH = ["arabianbusiness.com", "reuters.com", "constructionweekonline.com"];
 
 async function enrichWithImages(articles) {
-  const fast = articles.filter((a) => !a.imageUrl && !HEADLESS_DOMAINS.some((d) => a.url.includes(d))).slice(0, 300);
-  const slow = articles.filter((a) => !a.imageUrl && HEADLESS_DOMAINS.some((d) => a.url.includes(d))).slice(0, 30);
-
-  // Fast path — plain HTTP fetch
-  if (fast.length) {
-    console.log(`[images] fetching og:image for ${fast.length} articles (fast)...`);
-    const CONCURRENCY = 8;
-    let enriched = 0;
-    for (let i = 0; i < fast.length; i += CONCURRENCY) {
-      await Promise.allSettled(
-        fast.slice(i, i + CONCURRENCY).map(async (a) => {
-          const img = await fetchOgImage(a.url);
-          if (img) { a.imageUrl = img; enriched++; }
-        })
-      );
-    }
-    console.log(`[images] fast enriched ${enriched}/${fast.length}`);
+  const toEnrich = articles
+    .filter((a) => !a.imageUrl && !SKIP_ENRICH.some((d) => a.url.includes(d)))
+    .slice(0, 80);
+  if (!toEnrich.length) return;
+  console.log(`[images] fetching og:image for ${toEnrich.length} articles...`);
+  const CONCURRENCY = 4;
+  let enriched = 0;
+  for (let i = 0; i < toEnrich.length; i += CONCURRENCY) {
+    await Promise.allSettled(
+      toEnrich.slice(i, i + CONCURRENCY).map(async (a) => {
+        const img = await fetchOgImage(a.url);
+        if (img) { a.imageUrl = img; enriched++; }
+      })
+    );
   }
-
-  // Slow path — headless browser for Cloudflare-protected domains
-  if (slow.length) {
-    console.log(`[images] fetching og:image for ${slow.length} articles (headless)...`);
-    let enriched = 0;
-    for (const a of slow) {
-      const img = await fetchOgImageHeadless(a.url);
-      if (img) { a.imageUrl = img; enriched++; }
-    }
-    console.log(`[images] headless enriched ${enriched}/${slow.length}`);
-    // Close browser after batch to free memory
-    await browser?.close().catch(() => {});
-    browser = null;
-  }
+  console.log(`[images] enriched ${enriched}/${toEnrich.length}`);
 }
 
 // ── In-memory cache ──────────────────────────────────────────────────────────
