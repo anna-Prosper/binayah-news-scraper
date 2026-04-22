@@ -1,5 +1,6 @@
 import http from "http";
 import RssParser from "rss-parser";
+import puppeteerCore from "puppeteer-core";
 import puppeteer from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 
@@ -10,6 +11,21 @@ const UA = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.h
 const parser = new RssParser({ timeout: 12_000, headers: { "User-Agent": UA } });
 
 puppeteer.use(StealthPlugin());
+
+// Chrome paths: Render installs system Chrome via render.yaml build command
+const CHROME_PATHS = [
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/google-chrome",
+  "/usr/bin/chromium-browser",
+  "/usr/bin/chromium",
+];
+async function findChrome() {
+  const { access } = await import("fs/promises");
+  for (const p of CHROME_PATHS) {
+    try { await access(p); return p; } catch {}
+  }
+  return null;
+}
 
 // ── RSS sources ──────────────────────────────────────────────────────────────
 
@@ -224,7 +240,11 @@ const HEADLESS_DOMAINS = ["arabianbusiness.com", "reuters.com", "constructionwee
 let browser = null;
 async function getBrowser() {
   if (browser && browser.connected) return browser;
-  browser = await puppeteer.launch({
+  const executablePath = await findChrome();
+  if (!executablePath) throw new Error("No Chrome found on this host");
+  const launcher = puppeteer.use ? puppeteer : puppeteerCore;
+  browser = await launcher.launch({
+    executablePath,
     headless: true,
     args: [
       "--no-sandbox",
