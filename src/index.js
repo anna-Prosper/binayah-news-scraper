@@ -214,8 +214,13 @@ async function fetchOgImage(url) {
   }
 }
 
+// Domains known to block server-side og:image fetching (Cloudflare JS challenges, paywalls)
+const ENRICH_SKIP = ["arabianbusiness.com", "reuters.com", "constructionweekonline.com"];
+
 async function enrichWithImages(articles) {
-  const toEnrich = articles.filter((a) => !a.imageUrl).slice(0, 100);
+  const toEnrich = articles
+    .filter((a) => !a.imageUrl && !ENRICH_SKIP.some((d) => a.url.includes(d)))
+    .slice(0, 300);
   if (!toEnrich.length) return;
   console.log(`[images] fetching og:image for ${toEnrich.length} articles...`);
   const CONCURRENCY = 8;
