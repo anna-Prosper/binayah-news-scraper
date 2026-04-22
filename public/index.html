@@ -170,6 +170,23 @@
     background: var(--border);
     display: block;
   }
+  .card-image-placeholder {
+    width: 100%;
+    aspect-ratio: 16/9;
+    border-radius: 5px;
+    background: linear-gradient(135deg, #1a2332 0%, #0d1520 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 6px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+  }
   .card-summary {
     font-size: 12px;
     color: var(--muted);
@@ -323,17 +340,29 @@ function render() {
 }
 
 // ── Card HTML ──────────────────────────────────────────────────────────────
+const SOURCE_ICONS = {
+  "Arabian Business": "💼", "Gulf News": "📰", "Khaleej Times": "🗞️",
+  "Zawya": "📊", "Economy Middle East": "📈", "Gulf Business": "🏢",
+  "Reuters": "🌐", "Emirates247": "✈️", "Trade Arabia": "🏗️",
+  "Construction Week": "🏗️", "Property Finder": "🏠",
+};
+
 function card(a) {
   const date = a.publishedAt ? timeAgo(new Date(a.publishedAt)) : "";
-  const img = a.imageUrl
-    ? `<img class="card-image" src="${esc(a.imageUrl)}" alt="" loading="lazy" onerror="this.style.display='none'"/>`
-    : "";
+  let imgHtml;
+  if (a.imageUrl) {
+    imgHtml = `<img class="card-image" src="${esc(a.imageUrl)}" alt="" loading="lazy"
+      onerror="this.outerHTML='<div class=\\'card-image-placeholder\\'><span style=\\'font-size:22px\\'>${SOURCE_ICONS[a.source]||'📰'}</span><span>${esc(a.source)}</span></div>'"/>`;
+  } else {
+    const icon = SOURCE_ICONS[a.source] || "📰";
+    imgHtml = `<div class="card-image-placeholder"><span style="font-size:22px">${icon}</span><span>${esc(a.source)}</span></div>`;
+  }
   const summary = a.summary
     ? `<div class="card-summary">${esc(a.summary)}</div>`
     : "";
   return `
     <a class="card" href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">
-      ${img}
+      ${imgHtml}
       <div class="card-meta">
         <span class="source-badge">${esc(a.source)}</span>
         <span class="card-date">${date}</span>

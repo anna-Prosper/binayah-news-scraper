@@ -93,7 +93,10 @@ async function uploadImage(ogUrl, articleUrl) {
 // ── RSS sources ───────────────────────────────────────────────────────────────
 
 const RSS_FEEDS = [
-  { url: "https://www.arabianbusiness.com/feed", source: "Arabian Business" },
+  { url: "https://www.arabianbusiness.com/feed",                          source: "Arabian Business" },
+  { url: "https://economymiddleeast.com/feed",                            source: "Economy Middle East" },
+  { url: "https://www.emirates247.com/rss/mobile/v2/business.rss",       source: "Emirates247" },
+  { url: "https://www.propertyfinder.ae/blog/feed/",                      source: "Property Finder" },
 ];
 
 const GNEWS_FEEDS = [
@@ -104,8 +107,6 @@ const GNEWS_FEEDS = [
   { q: "tradearabia.com UAE property real estate",           source: "Trade Arabia" },
   { q: "constructionweekonline UAE real estate",             source: "Construction Week" },
   { q: "khaleejtimes UAE property real estate",              source: "Khaleej Times" },
-  { q: "economymiddleeast.com property real estate UAE",     source: "Economy Middle East" },
-  { q: "emirates247.com property real estate UAE",           source: "Emirates247" },
 ];
 
 function gnewsUrl(q) {
@@ -200,12 +201,29 @@ function resolveGNewsUrl(gnewsArticleUrl) {
   } catch { return null; }
 }
 
+// Resolve a GNews URL to the real article URL using headless
+async function resolveGNewsHeadless(gnewsUrl) {
+  return withPage(async (page) => {
+    await page.setDefaultNavigationTimeout(15_000);
+    await page.goto(gnewsUrl, { waitUntil: "domcontentloaded" });
+    let finalUrl = page.url();
+    if (finalUrl.includes("news.google.com")) {
+      await page.waitForNavigation({ timeout: 5000 }).catch(() => {});
+      finalUrl = page.url();
+    }
+    return finalUrl.includes("news.google.com") ? null : finalUrl;
+  });
+}
+
 // Get og:image from a URL using headless (for Cloudflare-protected domains)
 async function ogImageHeadless(url) {
   return withPage(async (page) => {
     await page.setDefaultNavigationTimeout(20_000);
     await page.goto(url, { waitUntil: "domcontentloaded" });
-    const img = await page.evaluate(() => document.querySelector('meta[property="og:image"]')?.getAttribute("content") || "");
+    const img = await page.evaluate(() =>
+      document.querySelector('meta[property="og:image"]')?.getAttribute("content") ||
+      document.querySelector('meta[name="twitter:image"]')?.getAttribute("content") || ""
+    );
     return img.startsWith("http") ? img : null;
   });
 }
@@ -257,7 +275,9 @@ async function fetchPageData(url) {
     if (!res.ok) return { imageUrl: "", body: "" };
     const html = await res.text();
     const m = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
-              html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+              html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i) ||
+              html.match(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i) ||
+              html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image["']/i);
     const img = m?.[1] || "";
     const imageUrl = img.startsWith("http") && !BAD_IMAGE_HOSTS.some((h) => img.includes(h)) ? img : "";
     const body = SKIP_BODY_DOMAINS.some((d) => url.includes(d)) ? "" : extractBody(html);
@@ -277,15 +297,16 @@ async function enrichWithImages(articles) {
     let dirty = false;
     const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
-    // Step 1: Resolve unresolved GNews URLs (base64 decode — no headless needed)
+    // Step 1: Resolve unresolved GNews URLs — base64 decode first, headless fallback
     const unresolvedGNews = articles
       .filter((a) => a.gnewsUrl && a.url.includes("news.google.com") && new Date(a.publishedAt).getTime() > sevenDaysAgo)
-      .slice(0, 50);
+      .slice(0, 30);
     if (unresolvedGNews.length) {
       console.log(`[urls] resolving ${unresolvedGNews.length} GNews URLs...`);
       let resolved = 0;
       for (const a of unresolvedGNews) {
-        const realUrl = resolveGNewsUrl(a.gnewsUrl);
+        let realUrl = resolveGNewsUrl(a.gnewsUrl);
+        if (!realUrl) realUrl = await resolveGNewsHeadless(a.gnewsUrl);
         if (realUrl) {
           urlCache[a.gnewsUrl] = realUrl;
           a.url = realUrl;
