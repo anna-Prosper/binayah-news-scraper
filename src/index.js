@@ -1,11 +1,15 @@
 import http from "http";
 import RssParser from "rss-parser";
+import puppeteer from "puppeteer-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
 
 const PORT = process.env.PORT || 3001;
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 min
 
 const UA = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
 const parser = new RssParser({ timeout: 12_000, headers: { "User-Agent": UA } });
+
+puppeteer.use(StealthPlugin());
 
 // ── RSS sources ──────────────────────────────────────────────────────────────
 
@@ -214,26 +218,79 @@ async function fetchOgImage(url) {
   }
 }
 
-// Domains known to block server-side og:image fetching (Cloudflare JS challenges, paywalls)
-const ENRICH_SKIP = ["arabianbusiness.com", "reuters.com", "constructionweekonline.com"];
+// Domains that need a headless browser to bypass Cloudflare JS challenges
+const HEADLESS_DOMAINS = ["arabianbusiness.com", "reuters.com", "constructionweekonline.com"];
+
+let browser = null;
+async function getBrowser() {
+  if (browser && browser.connected) return browser;
+  browser = await puppeteer.launch({
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--no-first-run",
+      "--no-zygote",
+    ],
+  });
+  browser.on("disconnected", () => { browser = null; });
+  return browser;
+}
+
+async function fetchOgImageHeadless(url) {
+  let page;
+  try {
+    const b = await getBrowser();
+    page = await b.newPage();
+    await page.setDefaultNavigationTimeout(15_000);
+    await page.goto(url, { waitUntil: "domcontentloaded" });
+    const img = await page.evaluate(() => {
+      const m = document.querySelector('meta[property="og:image"]');
+      return m ? m.getAttribute("content") || "" : "";
+    });
+    return img.startsWith("http") ? img : "";
+  } catch {
+    return "";
+  } finally {
+    await page?.close().catch(() => {});
+  }
+}
 
 async function enrichWithImages(articles) {
-  const toEnrich = articles
-    .filter((a) => !a.imageUrl && !ENRICH_SKIP.some((d) => a.url.includes(d)))
-    .slice(0, 300);
-  if (!toEnrich.length) return;
-  console.log(`[images] fetching og:image for ${toEnrich.length} articles...`);
-  const CONCURRENCY = 8;
-  let enriched = 0;
-  for (let i = 0; i < toEnrich.length; i += CONCURRENCY) {
-    await Promise.allSettled(
-      toEnrich.slice(i, i + CONCURRENCY).map(async (a) => {
-        const img = await fetchOgImage(a.url);
-        if (img) { a.imageUrl = img; enriched++; }
-      })
-    );
+  const fast = articles.filter((a) => !a.imageUrl && !HEADLESS_DOMAINS.some((d) => a.url.includes(d))).slice(0, 300);
+  const slow = articles.filter((a) => !a.imageUrl && HEADLESS_DOMAINS.some((d) => a.url.includes(d))).slice(0, 30);
+
+  // Fast path — plain HTTP fetch
+  if (fast.length) {
+    console.log(`[images] fetching og:image for ${fast.length} articles (fast)...`);
+    const CONCURRENCY = 8;
+    let enriched = 0;
+    for (let i = 0; i < fast.length; i += CONCURRENCY) {
+      await Promise.allSettled(
+        fast.slice(i, i + CONCURRENCY).map(async (a) => {
+          const img = await fetchOgImage(a.url);
+          if (img) { a.imageUrl = img; enriched++; }
+        })
+      );
+    }
+    console.log(`[images] fast enriched ${enriched}/${fast.length}`);
   }
-  console.log(`[images] enriched ${enriched}/${toEnrich.length}`);
+
+  // Slow path — headless browser for Cloudflare-protected domains
+  if (slow.length) {
+    console.log(`[images] fetching og:image for ${slow.length} articles (headless)...`);
+    let enriched = 0;
+    for (const a of slow) {
+      const img = await fetchOgImageHeadless(a.url);
+      if (img) { a.imageUrl = img; enriched++; }
+    }
+    console.log(`[images] headless enriched ${enriched}/${slow.length}`);
+    // Close browser after batch to free memory
+    await browser?.close().catch(() => {});
+    browser = null;
+  }
 }
 
 // ── In-memory cache ──────────────────────────────────────────────────────────
