@@ -307,8 +307,8 @@ async function enrichWithImages(articles) {
     if (fast.length) {
       console.log(`[enrich] fast: ${fast.length} articles...`);
       let imgCount = 0, bodyCount = 0;
-      for (let i = 0; i < fast.length; i += 8) {
-        await Promise.allSettled(fast.slice(i, i + 8).map(async (a) => {
+      for (let i = 0; i < fast.length; i += 16) {
+        await Promise.allSettled(fast.slice(i, i + 16).map(async (a) => {
           const { imageUrl, body } = await fetchPageData(a.url);
           if (imageUrl && !a.imageUrl) {
             const s3Url = await uploadImage(imageUrl, a.url);
@@ -331,7 +331,7 @@ async function enrichWithImages(articles) {
     // Step 3: Headless og:image for Cloudflare-protected domains, recent only
     const slow = articles
       .filter((a) => !a.imageUrl && HEADLESS_DOMAINS.some((d) => a.url.includes(d)) && new Date(a.publishedAt).getTime() > sevenDaysAgo)
-      .slice(0, 20);
+      .slice(0, 30);
     if (slow.length) {
       console.log(`[images] headless: ${slow.length} articles...`);
       let enriched = 0;
@@ -369,12 +369,12 @@ async function getNews(limit = 50) {
   return cache.data.slice(0, limit);
 }
 
-// Run enrichment every 5 min so images fill in continuously between cache refreshes
+// Run enrichment every 2 min so images fill in continuously between cache refreshes
 setInterval(() => {
   if (cache.data?.length) {
     enrichWithImages(cache.data).catch((e) => console.warn("[enrich] interval failed:", e.message));
   }
-}, 5 * 60 * 1000);
+}, 2 * 60 * 1000);
 
 loadCaches()
   .then(() => getNews())
