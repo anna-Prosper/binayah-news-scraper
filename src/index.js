@@ -255,6 +255,7 @@ function resolveGNewsUrl(gnewsArticleUrl) {
 // publisher URL. Uses Chrome UA (Googlebot gets blocked on this endpoint).
 const CHROME_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
 
+let batchDebugLogged = false;
 async function resolveGNewsBatch(gnewsUrl) {
   try {
     const m = gnewsUrl.match(/articles\/([A-Za-z0-9_-]+)/);
@@ -263,23 +264,34 @@ async function resolveGNewsBatch(gnewsUrl) {
 
     // 1. Fetch article page for signature + timestamp (try /articles/, fallback /rss/articles/)
     let html = null;
+    let lastStatus = 0;
     for (const prefix of ["/articles/", "/rss/articles/"]) {
       try {
         const r = await fetch(`https://news.google.com${prefix}${articleId}`, {
           headers: { "User-Agent": CHROME_UA },
           signal: AbortSignal.timeout(10_000),
         });
+        lastStatus = r.status;
         if (r.ok) { html = await r.text(); break; }
-      } catch {}
+      } catch (e) { lastStatus = -1; }
     }
-    if (!html) return null;
+    if (!html) {
+      if (!batchDebugLogged) { console.warn(`[batch] GET page failed, status=${lastStatus}`); batchDebugLogged = true; }
+      return null;
+    }
     // Python uses selectolax to find `c-wiz > div[jscontroller]` and read its
     // data-n-a-sg / data-n-a-ts. We match that div's attrs via regex.
     const divMatch = html.match(/<c-wiz[^>]*>\s*<div[^>]+jscontroller[^>]*>/);
     const region = divMatch ? html.slice(divMatch.index, divMatch.index + 2000) : html;
     const sig = region.match(/data-n-a-sg="([^"]+)"/)?.[1];
     const ts  = region.match(/data-n-a-ts="([^"]+)"/)?.[1];
-    if (!sig || !ts) return null;
+    if (!sig || !ts) {
+      if (!batchDebugLogged) {
+        console.warn(`[batch] sig/ts missing — html len=${html.length}, divMatch=${!!divMatch}, htmlSample=${html.slice(0,200).replace(/\s+/g,' ')}`);
+        batchDebugLogged = true;
+      }
+      return null;
+    }
 
     // 2. POST batchexecute — payload order is [articleId, timestamp, signature]
     //    (Not sig/ts/articleId — that was my earlier bug)
@@ -298,14 +310,20 @@ async function resolveGNewsBatch(gnewsUrl) {
       body,
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      if (!batchDebugLogged) { console.warn(`[batch] POST failed status=${res.status}`); batchDebugLogged = true; }
+      return null;
+    }
     const text = await res.text();
 
     // Response format: `)]}'\n\n<len>\n[[...]]\n<len>\n...`.
     // Python does: parsed = json.loads(text.split("\n\n")[1])[:-2]
     //              decoded_url = json.loads(parsed[0][2])[1]
     const parts = text.split("\n\n");
-    if (parts.length < 2) return null;
+    if (parts.length < 2) {
+      if (!batchDebugLogged) { console.warn(`[batch] response parse: parts=${parts.length}, sample=${text.slice(0,200)}`); batchDebugLogged = true; }
+      return null;
+    }
     const outer = JSON.parse(parts[1]);
     // outer[0][2] is a JSON-encoded string; position 1 of that parsed array is the URL
     const innerStr = outer[0]?.[2];
