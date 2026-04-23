@@ -472,7 +472,7 @@ function extractBody(html) {
 
 async function fetchPageData(url) {
   try {
-    const res = await fetch(url, { headers: { "User-Agent": UA, Accept: "text/html" }, signal: AbortSignal.timeout(10_000), redirect: "follow" });
+    const res = await fetch(url, { headers: { "User-Agent": CHROME_UA, Accept: "text/html,application/xhtml+xml,*/*;q=0.9" }, signal: AbortSignal.timeout(10_000), redirect: "follow" });
     if (!res.ok) return { imageUrl: "", body: "" };
     const html = await res.text();
     const m = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
@@ -488,7 +488,7 @@ async function fetchPageData(url) {
 
 // ── Enrichment pipeline ───────────────────────────────────────────────────────
 
-const HEADLESS_DOMAINS = ["arabianbusiness.com", "reuters.com", "khaleejtimes.com"];
+const HEADLESS_DOMAINS = ["arabianbusiness.com", "reuters.com"];
 let enrichmentRunning = false;
 
 async function enrichWithImages(articles) {

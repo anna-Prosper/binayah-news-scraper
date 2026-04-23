@@ -196,6 +196,31 @@
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
+  .body-toggle {
+    align-self: flex-start;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--muted);
+    cursor: pointer;
+    font-family: var(--font);
+    font-size: 11px;
+    padding: 3px 10px;
+    transition: all 0.15s;
+  }
+  .body-toggle:hover { border-color: var(--accent); color: var(--text); }
+  .card-body {
+    display: none;
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.6;
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+    margin-top: 2px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .card-body.open { display: block; }
 
   /* ── States ── */
   #loading, #empty {
@@ -336,6 +361,7 @@ function render() {
     grid.innerHTML = `<div id="empty">No articles match your filters.</div>`;
     return;
   }
+  cardIdx = 0;
   grid.innerHTML = visible.map(card).join("");
 }
 
@@ -347,8 +373,10 @@ const SOURCE_ICONS = {
   "Construction Week": "🏗️", "Property Finder": "🏠",
 };
 
+let cardIdx = 0;
 function card(a) {
   const date = a.publishedAt ? timeAgo(new Date(a.publishedAt)) : "";
+  const idx = cardIdx++;
   let imgHtml;
   if (a.imageUrl) {
     imgHtml = `<img class="card-image" src="${esc(a.imageUrl)}" alt="" loading="lazy"
@@ -360,16 +388,31 @@ function card(a) {
   const summary = a.summary
     ? `<div class="card-summary">${esc(a.summary)}</div>`
     : "";
+  const bodyHtml = a.body
+    ? `<button class="body-toggle" onclick="toggleBody(event,${idx})">Show scraped content</button>
+       <div class="card-body" id="body-${idx}">${esc(a.body)}</div>`
+    : "";
   return `
-    <a class="card" href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">
-      ${imgHtml}
-      <div class="card-meta">
-        <span class="source-badge">${esc(a.source)}</span>
-        <span class="card-date">${date}</span>
-      </div>
-      <div class="card-title">${esc(a.title)}</div>
-      ${summary}
-    </a>`;
+    <div class="card" data-url="${esc(a.url)}">
+      <a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;color:inherit;display:contents">
+        ${imgHtml}
+        <div class="card-meta">
+          <span class="source-badge">${esc(a.source)}</span>
+          <span class="card-date">${date}</span>
+        </div>
+        <div class="card-title">${esc(a.title)}</div>
+        ${summary}
+      </a>
+      ${bodyHtml}
+    </div>`;
+}
+
+function toggleBody(e, idx) {
+  e.stopPropagation();
+  const el = document.getElementById("body-" + idx);
+  const btn = e.currentTarget;
+  const open = el.classList.toggle("open");
+  btn.textContent = open ? "Hide content" : "Show scraped content";
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
