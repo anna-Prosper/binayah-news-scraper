@@ -488,7 +488,7 @@ async function fetchPageData(url) {
 
 // ── Enrichment pipeline ───────────────────────────────────────────────────────
 
-const HEADLESS_DOMAINS = ["arabianbusiness.com", "reuters.com"];
+const HEADLESS_DOMAINS = ["arabianbusiness.com", "reuters.com", "khaleejtimes.com"];
 let enrichmentRunning = false;
 
 async function enrichWithImages(articles) {
@@ -603,7 +603,7 @@ async function enrichWithImages(articles) {
     // and imageCache persists so it's a one-time cost per article.
     const slow = articles
       .filter((a) => !a.imageUrl && HEADLESS_DOMAINS.some((d) => a.url.includes(d)))
-      .slice(0, 30);
+      .slice(0, 40);
     if (slow.length) {
       console.log(`[images] headless: ${slow.length} articles...`);
       let enriched = 0;
