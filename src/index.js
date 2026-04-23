@@ -456,31 +456,54 @@ let _abCookies = null;
 let _abLoginAt  = 0;
 const AB_SESSION_TTL = 4 * 60 * 60 * 1000; // re-login every 4 h
 
+async function waitForCFClear(page, timeoutMs = 12_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const title = await page.title().catch(() => "");
+    if (!title.toLowerCase().includes("just a moment")) return true;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return false;
+}
+
 async function ensureABLogin() {
   if (!AB_EMAIL || !AB_PASSWORD) return false;
   if (_abCookies && Date.now() - _abLoginAt < AB_SESSION_TTL) return true;
 
   console.log("[ab-login] logging in...");
   const cookies = await withPage(async (page) => {
-    await page.setDefaultNavigationTimeout(30_000);
-    try {
-      await page.goto("https://www.arabianbusiness.com/login", { waitUntil: "networkidle2", timeout: 30_000 });
-    } catch { /* partial load ok */ }
+    await page.setDefaultNavigationTimeout(35_000);
 
-    const emailSel = 'input[type="email"], input[name="email"], input[id*="email"]';
-    try { await page.waitForSelector(emailSel, { timeout: 8_000 }); } catch { return null; }
+    // Step 1: Load homepage first — stealth resolves CF clearance cookie here
+    try { await page.goto("https://www.arabianbusiness.com", { waitUntil: "domcontentloaded", timeout: 25_000 }); } catch {}
+    await waitForCFClear(page);
+    console.log(`[ab-login] homepage loaded, title="${(await page.title().catch(() => "?")).slice(0, 40)}"`);
+
+    // Step 2: Navigate to login page (CF clearance cookie now set)
+    try { await page.goto("https://www.arabianbusiness.com/login", { waitUntil: "domcontentloaded", timeout: 25_000 }); } catch {}
+    const cfOk = await waitForCFClear(page);
+    const loginTitle = await page.title().catch(() => "?");
+    console.log(`[ab-login] login page: title="${loginTitle.slice(0, 40)}", cfOk=${cfOk}`);
+
+    // Step 3: Fill in credentials
+    const emailSel = 'input[type="email"], input[name="email"], input[id*="email"], input[placeholder*="mail"]';
+    try { await page.waitForSelector(emailSel, { timeout: 10_000 }); } catch {
+      console.warn("[ab-login] email field not found — page may be CF-blocked or login URL changed");
+      return null;
+    }
 
     await page.click(emailSel);
     await page.type(emailSel, AB_EMAIL, { delay: 60 });
     await page.type('input[type="password"]', AB_PASSWORD, { delay: 60 });
 
     await Promise.all([
-      page.waitForNavigation({ timeout: 15_000, waitUntil: "networkidle2" }).catch(() => {}),
+      page.waitForNavigation({ timeout: 15_000, waitUntil: "domcontentloaded" }).catch(() => {}),
       page.click('button[type="submit"]').catch(() => page.keyboard.press("Enter")),
     ]);
 
+    const postUrl = page.url();
     const c = await page.cookies();
-    console.log(`[ab-login] url=${page.url().slice(0, 70)}, cookies=${c.length}`);
+    console.log(`[ab-login] post-login url=${postUrl.slice(0, 70)}, cookies=${c.length}`);
     return c.length > 3 ? c : null;
   });
 
