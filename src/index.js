@@ -255,6 +255,27 @@ function resolveGNewsUrl(gnewsArticleUrl) {
 // publisher URL. Uses Chrome UA (Googlebot gets blocked on this endpoint).
 const CHROME_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
 
+// Tier 0: Vercel proxy — delegates batchexecute to Vercel's IP pool (not blocked by Google unlike Render's IPs)
+const VERCEL_PROXY = "https://binayah-news-dashboard.vercel.app/api/resolve-gnews";
+async function resolveGNewsViaVercel(gnewsUrl) {
+  try {
+    const m = gnewsUrl.match(/articles\/([A-Za-z0-9_-]+)/);
+    if (!m) return null;
+    const r = await fetch(`${VERCEL_PROXY}?id=${encodeURIComponent(m[1])}`, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!r.ok) {
+      console.warn(`[vercel-proxy] HTTP ${r.status} for ${m[1]}`);
+      return null;
+    }
+    const json = await r.json();
+    return typeof json.url === "string" && json.url.startsWith("http") ? json.url : null;
+  } catch (e) {
+    console.warn(`[vercel-proxy] error: ${e.message}`);
+    return null;
+  }
+}
+
 let batchDebugLogged = false;
 async function resolveGNewsBatch(gnewsUrl) {
   try {
@@ -481,11 +502,26 @@ async function enrichWithImages(articles) {
       .slice(0, 100);
     if (unresolvedGNews.length) {
       console.log(`[urls] resolving ${unresolvedGNews.length} GNews URLs...`);
-      let resolved = 0, viaBatch = 0, viaB64 = 0, viaClick = 0, viaHeadless = 0;
+      let resolved = 0, viaVercel = 0, viaBatch = 0, viaB64 = 0, viaClick = 0, viaHeadless = 0;
 
-      // Tier 1: batchexecute (parallel batches of 8)
+      // Tier 0: Vercel proxy (parallel batches of 8) — avoids Render's blocked IPs
       for (let i = 0; i < unresolvedGNews.length; i += 8) {
         await Promise.allSettled(unresolvedGNews.slice(i, i + 8).map(async (a) => {
+          const realUrl = await resolveGNewsViaVercel(a.gnewsUrl);
+          if (!realUrl) return;
+          viaVercel++;
+          queueUrl(a.gnewsUrl, realUrl);
+          a.url = realUrl;
+          if (imageCache[realUrl]) a.imageUrl = imageCache[realUrl];
+          resolved++;
+        }));
+        await flushCaches();
+      }
+
+      // Tier 1: direct batchexecute fallback (parallel batches of 8)
+      const stillUnresolved1 = unresolvedGNews.filter((a) => a.url.includes("news.google.com"));
+      for (let i = 0; i < stillUnresolved1.length; i += 8) {
+        await Promise.allSettled(stillUnresolved1.slice(i, i + 8).map(async (a) => {
           const realUrl = (await resolveGNewsBatch(a.gnewsUrl)) || resolveGNewsUrl(a.gnewsUrl);
           if (!realUrl) return;
           if (realUrl !== resolveGNewsUrl(a.gnewsUrl)) viaBatch++; else viaB64++;
@@ -521,7 +557,7 @@ async function enrichWithImages(articles) {
         }
       }
 
-      console.log(`[urls] resolved ${resolved}/${unresolvedGNews.length} (batch:${viaBatch} b64:${viaB64} click:${viaClick} headless:${viaHeadless})`);
+      console.log(`[urls] resolved ${resolved}/${unresolvedGNews.length} (vercel:${viaVercel} batch:${viaBatch} b64:${viaB64} click:${viaClick} headless:${viaHeadless})`);
       await _browser?.close().catch(() => {}); _browser = null;
       await flushCaches();
     }
