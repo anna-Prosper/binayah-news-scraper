@@ -198,17 +198,26 @@
   }
   .body-toggle {
     align-self: flex-start;
-    background: transparent;
-    border: 1px solid var(--border);
+    background: rgba(88,166,255,0.12);
+    border: 1px solid rgba(88,166,255,0.4);
     border-radius: 4px;
-    color: var(--muted);
+    color: var(--accent);
     cursor: pointer;
     font-family: var(--font);
     font-size: 11px;
-    padding: 3px 10px;
+    font-weight: 600;
+    padding: 4px 12px;
     transition: all 0.15s;
+    letter-spacing: 0.2px;
   }
-  .body-toggle:hover { border-color: var(--accent); color: var(--text); }
+  .body-toggle:hover { background: rgba(88,166,255,0.22); border-color: var(--accent); }
+  .body-toggle.paywall {
+    background: rgba(255,165,0,0.12);
+    border-color: rgba(255,165,0,0.45);
+    color: #f0a040;
+    cursor: default;
+  }
+  .body-toggle.paywall:hover { background: rgba(255,165,0,0.18); border-color: #f0a040; }
   .card-body {
     display: none;
     font-size: 12px;
@@ -388,10 +397,14 @@ function card(a) {
   const summary = a.summary
     ? `<div class="card-summary">${esc(a.summary)}</div>`
     : "";
-  const bodyHtml = a.body
-    ? `<button class="body-toggle" onclick="toggleBody(event,${idx})">Show scraped content</button>
-       <div class="card-body" id="body-${idx}">${esc(a.body)}</div>`
-    : "";
+  const PAYWALLED = ["Arabian Business", "Reuters"];
+  let bodyHtml = "";
+  if (a.body) {
+    bodyHtml = `<button class="body-toggle" onclick="toggleBody(event,${idx})">Show scraped content</button>
+                <div class="card-body" id="body-${idx}">${esc(a.body)}</div>`;
+  } else if (PAYWALLED.includes(a.source)) {
+    bodyHtml = `<button class="body-toggle paywall" disabled>Content behind paywall</button>`;
+  }
   return `
     <div class="card" data-url="${esc(a.url)}">
       <a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;color:inherit;display:contents">
