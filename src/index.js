@@ -241,38 +241,50 @@ function resolveGNewsUrl(gnewsArticleUrl) {
   } catch { return null; }
 }
 
-// Resolve a GNews URL via Google's batchexecute RPC (same approach as
-// Python's googlenewsdecoder). No headless needed — single POST returns
-// the real publisher URL. Much faster than Puppeteer.
+// Resolve a GNews URL via Google's batchexecute RPC — port of Python's
+// googlenewsdecoder v1 (new_decoderv1). Single POST returns the real
+// publisher URL. Uses Chrome UA (Googlebot gets blocked on this endpoint).
+const CHROME_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
+
 async function resolveGNewsBatch(gnewsUrl) {
   try {
     const m = gnewsUrl.match(/articles\/([A-Za-z0-9_-]+)/);
     if (!m) return null;
     const articleId = m[1];
 
-    // 1. Fetch the article page to get signature + timestamp
-    const pageRes = await fetch(`https://news.google.com/articles/${articleId}`, {
-      headers: { "User-Agent": UA },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!pageRes.ok) return null;
-    const html = await pageRes.text();
-    const sig = html.match(/data-n-a-sg="([^"]+)"/)?.[1];
-    const ts  = html.match(/data-n-a-ts="(\d+)"/)?.[1];
+    // 1. Fetch article page for signature + timestamp (try /articles/, fallback /rss/articles/)
+    let html = null;
+    for (const prefix of ["/articles/", "/rss/articles/"]) {
+      try {
+        const r = await fetch(`https://news.google.com${prefix}${articleId}`, {
+          headers: { "User-Agent": CHROME_UA },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (r.ok) { html = await r.text(); break; }
+      } catch {}
+    }
+    if (!html) return null;
+    // Python uses selectolax to find `c-wiz > div[jscontroller]` and read its
+    // data-n-a-sg / data-n-a-ts. We match that div's attrs via regex.
+    const divMatch = html.match(/<c-wiz[^>]*>\s*<div[^>]+jscontroller[^>]*>/);
+    const region = divMatch ? html.slice(divMatch.index, divMatch.index + 2000) : html;
+    const sig = region.match(/data-n-a-sg="([^"]+)"/)?.[1];
+    const ts  = region.match(/data-n-a-ts="([^"]+)"/)?.[1];
     if (!sig || !ts) return null;
 
-    // 2. POST to batchexecute
-    const inner = JSON.stringify(["garturlreq",
-      [["X","X",["X","X"],null,null,1,1,"US:en",null,1,null,null,null,null,null,0,1],"X","X",1,[9,1,1,1,1],1,0,"0",0,0,null,0],
-      sig, Number(ts), articleId]);
-    const payload = JSON.stringify([[["Fbv4je", inner, null, "generic"]]]);
-    const body = "f.req=" + encodeURIComponent(payload);
+    // 2. POST batchexecute — payload order is [articleId, timestamp, signature]
+    //    (Not sig/ts/articleId — that was my earlier bug)
+    const innerPayload = [
+      "Fbv4je",
+      `["garturlreq",[["X","X",["X","X"],null,null,1,1,"US:en",null,1,null,null,null,null,null,0,1],"X","X",1,[1,1,1],1,1,null,0,0,null,0],"${articleId}",${ts},"${sig}"]`,
+    ];
+    const body = "f.req=" + encodeURIComponent(JSON.stringify([[innerPayload]]));
 
     const res = await fetch("https://news.google.com/_/DotsSplashUi/data/batchexecute", {
       method: "POST",
       headers: {
-        "User-Agent": UA,
         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "User-Agent": CHROME_UA,
       },
       body,
       signal: AbortSignal.timeout(10_000),
@@ -280,22 +292,18 @@ async function resolveGNewsBatch(gnewsUrl) {
     if (!res.ok) return null;
     const text = await res.text();
 
-    // Response is `)]}'\n<json>` — the inner payload is a JSON-string containing the real URL
-    const jsonStart = text.indexOf("[");
-    if (jsonStart < 0) return null;
-    const outer = JSON.parse(text.slice(jsonStart));
-    for (const row of outer) {
-      if (!Array.isArray(row)) continue;
-      for (const cell of row) {
-        if (typeof cell === "string" && cell.startsWith("[\"garturlres\"")) {
-          const parsed = JSON.parse(cell);
-          if (parsed[1] && typeof parsed[1] === "string" && parsed[1].startsWith("http")) {
-            return parsed[1];
-          }
-        }
-      }
-    }
-    return null;
+    // Response format: `)]}'\n\n<len>\n[[...]]\n<len>\n...`.
+    // Python does: parsed = json.loads(text.split("\n\n")[1])[:-2]
+    //              decoded_url = json.loads(parsed[0][2])[1]
+    const parts = text.split("\n\n");
+    if (parts.length < 2) return null;
+    const outer = JSON.parse(parts[1]);
+    // outer[0][2] is a JSON-encoded string; position 1 of that parsed array is the URL
+    const innerStr = outer[0]?.[2];
+    if (typeof innerStr !== "string") return null;
+    const inner = JSON.parse(innerStr);
+    const url = inner?.[1];
+    return typeof url === "string" && url.startsWith("http") ? url : null;
   } catch { return null; }
 }
 
