@@ -431,7 +431,7 @@ async function ogImageHeadless(url) {
 
 // ── Page data (og:image + article body) via plain HTTP ───────────────────────
 
-const BAD_IMAGE_HOSTS = ["lh3.googleusercontent.com", "news.google.com"];
+const BAD_IMAGE_HOSTS = ["lh3.googleusercontent.com", "news.google.com", "KT.jpg"];
 const SKIP_BODY_DOMAINS = ["arabianbusiness.com", "reuters.com"];
 
 function cleanBodyText(text) {
@@ -488,7 +488,7 @@ async function fetchPageData(url) {
 
 // ── Enrichment pipeline ───────────────────────────────────────────────────────
 
-const HEADLESS_DOMAINS = ["arabianbusiness.com", "reuters.com"];
+const HEADLESS_DOMAINS = ["arabianbusiness.com", "reuters.com", "khaleejtimes.com"];
 let enrichmentRunning = false;
 
 async function enrichWithImages(articles) {
