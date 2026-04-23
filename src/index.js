@@ -498,7 +498,7 @@ async function enrichWithImages(articles) {
     //   (3) headless + poll page.url() for JS redirect (last resort)
     // Base64 decode is a free pre-check for older URL formats.
     const unresolvedGNews = articles
-      .filter((a) => a.gnewsUrl && a.url.includes("news.google.com") && new Date(a.publishedAt).getTime() > sevenDaysAgo)
+      .filter((a) => a.gnewsUrl && a.url.includes("news.google.com"))
       .slice(0, 100);
     if (unresolvedGNews.length) {
       console.log(`[urls] resolving ${unresolvedGNews.length} GNews URLs...`);
