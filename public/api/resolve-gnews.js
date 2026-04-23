@@ -1,6 +1,6 @@
 // Vercel serverless proxy for Google News batchexecute URL resolution.
 // Render's IPs get 429 from Google; Vercel's IP pool is not affected.
-export const config = { runtime: "nodejs20.x" };
+export const config = { runtime: "nodejs" };
 
 const CHROME_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
