@@ -486,19 +486,29 @@ async function ensureABLogin() {
     console.log(`[ab-login] login page: title="${loginTitle.slice(0, 40)}", cfOk=${cfOk}`);
 
     // Step 3: Fill in credentials
-    const emailSel = 'input[type="email"], input[name="email"], input[id*="email"], input[placeholder*="mail"]';
+    // AB uses WordPress login: input#user_login (name="log") + input#user_pass (name="pwd")
+    const emailSel = '#user_login, input[name="log"], input[type="email"], input[name="email"]';
+    const passSel  = '#user_pass, input[name="pwd"], input[type="password"]';
+    const submitSel = '#wp-submit, input[name="wp-submit"], button[type="submit"], input[type="submit"]';
+
     try { await page.waitForSelector(emailSel, { timeout: 10_000 }); } catch {
       console.warn("[ab-login] email field not found — page may be CF-blocked or login URL changed");
+      // Log visible inputs for diagnosis
+      const inputs = await page.evaluate(() =>
+        [...document.querySelectorAll("input")].map((i) => `${i.type}|${i.name}|${i.id}`).join(", ")
+      ).catch(() => "");
+      console.warn("[ab-login] inputs on page:", inputs.slice(0, 200));
       return null;
     }
 
     await page.click(emailSel);
     await page.type(emailSel, AB_EMAIL, { delay: 60 });
-    await page.type('input[type="password"]', AB_PASSWORD, { delay: 60 });
+    await page.click(passSel);
+    await page.type(passSel, AB_PASSWORD, { delay: 60 });
 
     await Promise.all([
       page.waitForNavigation({ timeout: 15_000, waitUntil: "domcontentloaded" }).catch(() => {}),
-      page.click('button[type="submit"]').catch(() => page.keyboard.press("Enter")),
+      page.click(submitSel).catch(() => page.keyboard.press("Enter")),
     ]);
 
     const postUrl = page.url();
