@@ -447,10 +447,94 @@ async function ogImageHeadless(url) {
   });
 }
 
+// ── Authenticated headless scraping (Arabian Business login) ──────────────────
+
+const AB_EMAIL    = process.env.AB_EMAIL;
+const AB_PASSWORD = process.env.AB_PASSWORD;
+
+let _abCookies = null;
+let _abLoginAt  = 0;
+const AB_SESSION_TTL = 4 * 60 * 60 * 1000; // re-login every 4 h
+
+async function ensureABLogin() {
+  if (!AB_EMAIL || !AB_PASSWORD) return false;
+  if (_abCookies && Date.now() - _abLoginAt < AB_SESSION_TTL) return true;
+
+  console.log("[ab-login] logging in...");
+  const cookies = await withPage(async (page) => {
+    await page.setDefaultNavigationTimeout(30_000);
+    try {
+      await page.goto("https://www.arabianbusiness.com/login", { waitUntil: "networkidle2", timeout: 30_000 });
+    } catch { /* partial load ok */ }
+
+    const emailSel = 'input[type="email"], input[name="email"], input[id*="email"]';
+    try { await page.waitForSelector(emailSel, { timeout: 8_000 }); } catch { return null; }
+
+    await page.click(emailSel);
+    await page.type(emailSel, AB_EMAIL, { delay: 60 });
+    await page.type('input[type="password"]', AB_PASSWORD, { delay: 60 });
+
+    await Promise.all([
+      page.waitForNavigation({ timeout: 15_000, waitUntil: "networkidle2" }).catch(() => {}),
+      page.click('button[type="submit"]').catch(() => page.keyboard.press("Enter")),
+    ]);
+
+    const c = await page.cookies();
+    console.log(`[ab-login] url=${page.url().slice(0, 70)}, cookies=${c.length}`);
+    return c.length > 3 ? c : null;
+  });
+
+  if (cookies) {
+    _abCookies = cookies;
+    _abLoginAt  = Date.now();
+    console.log("[ab-login] session established");
+    return true;
+  }
+  console.warn("[ab-login] login failed — will retry next cycle");
+  return false;
+}
+
+async function scrapeABBody(url) {
+  if (!_abCookies) return "";
+  return (await withPage(async (page) => {
+    await page.setCookie(..._abCookies);
+    await page.setDefaultNavigationTimeout(30_000);
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    } catch { /* partial load — still try to extract */ }
+
+    if (page.url().includes("/login")) {
+      _abCookies = null; // session expired — force re-login next cycle
+      return "";
+    }
+
+    const body = await page.evaluate(() => {
+      const SELECTORS = [
+        ".article__body", ".article-body", ".article-content",
+        '[class*="article-body"]', '[class*="articleBody"]', "article",
+      ];
+      for (const sel of SELECTORS) {
+        const el = document.querySelector(sel);
+        if (!el) continue;
+        const paras = [...el.querySelectorAll("p")]
+          .map((p) => p.textContent.trim())
+          .filter((p) => p.length > 40);
+        if (paras.length >= 2) return paras.slice(0, 8).join(" ");
+      }
+      const paras = [...document.querySelectorAll("p")]
+        .map((p) => p.textContent.trim())
+        .filter((p) => p.length > 60);
+      return paras.slice(0, 7).join(" ");
+    }).catch(() => "");
+
+    return body || "";
+  })) || "";
+}
+
 // ── Page data (og:image + article body) via plain HTTP ───────────────────────
 
 const BAD_IMAGE_HOSTS = ["lh3.googleusercontent.com", "news.google.com", "KT.jpg"];
-const SKIP_BODY_DOMAINS = ["arabianbusiness.com", "reuters.com"];
+const SKIP_BODY_DOMAINS = ["reuters.com"];
 
 function cleanBodyText(text) {
   return text
@@ -612,6 +696,29 @@ async function enrichWithImages(articles) {
         await flushCaches();
       }
       console.log(`[enrich] vercel-og done — images: ${voImg}/${vercelOg.length}, bodies: ${voBody}`);
+    }
+
+    // Step 2.5: Arabian Business — scrape body via logged-in headless session
+    const abNeedBody = articles
+      .filter((a) => !a.body && a.url.includes("arabianbusiness.com"))
+      .slice(0, 15); // cap per cycle — each page takes ~5s
+    if (abNeedBody.length) {
+      console.log(`[ab-login] ${abNeedBody.length} articles need body...`);
+      const loggedIn = await ensureABLogin();
+      if (loggedIn) {
+        let abBodyCount = 0;
+        for (const a of abNeedBody) {
+          const body = await scrapeABBody(a.url);
+          if (body) {
+            a.body = body.slice(0, 1500);
+            queueBody(a.url, a.body);
+            abBodyCount++;
+          }
+        }
+        console.log(`[ab-login] scraped ${abBodyCount}/${abNeedBody.length}`);
+        await flushCaches();
+        await _browser?.close().catch(() => {}); _browser = null;
+      }
     }
 
     // Step 2: Fetch page data (image + body) for all open-access articles in one request

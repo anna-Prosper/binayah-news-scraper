@@ -397,7 +397,7 @@ function card(a) {
   const summary = a.summary
     ? `<div class="card-summary">${esc(a.summary)}</div>`
     : "";
-  const PAYWALLED = ["Arabian Business", "Reuters"];
+  const PAYWALLED = ["Reuters"];
   let bodyHtml = "";
   if (a.body) {
     bodyHtml = `<button class="body-toggle" onclick="toggleBody(event,${idx})">📄 Show scraped content</button>
