@@ -256,6 +256,21 @@ function resolveGNewsUrl(gnewsArticleUrl) {
   } catch { return null; }
 }
 
+// Domains whose og:image must be fetched via Vercel proxy (Render IPs blocked by Cloudflare)
+const VERCEL_OG_DOMAINS = ["khaleejtimes.com"];
+const VERCEL_OG_PROXY = "https://binayah-news-dashboard.vercel.app/api/fetch-og";
+
+async function fetchOgViaVercel(url) {
+  try {
+    const r = await fetch(`${VERCEL_OG_PROXY}?url=${encodeURIComponent(url)}`, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!r.ok) return "";
+    const json = await r.json();
+    return typeof json.imageUrl === "string" && json.imageUrl.startsWith("http") ? json.imageUrl : "";
+  } catch { return ""; }
+}
+
 // Resolve a GNews URL via Google's batchexecute RPC — port of Python's
 // googlenewsdecoder v1 (new_decoderv1). Single POST returns the real
 // publisher URL. Uses Chrome UA (Googlebot gets blocked on this endpoint).
@@ -488,7 +503,7 @@ async function fetchPageData(url) {
 
 // ── Enrichment pipeline ───────────────────────────────────────────────────────
 
-const HEADLESS_DOMAINS = ["arabianbusiness.com", "reuters.com", "khaleejtimes.com"];
+const HEADLESS_DOMAINS = ["arabianbusiness.com", "reuters.com"];
 let enrichmentRunning = false;
 
 async function enrichWithImages(articles) {
@@ -568,11 +583,35 @@ async function enrichWithImages(articles) {
       await flushCaches();
     }
 
+    // Step 1.5: Vercel og:image proxy for domains blocked by Cloudflare on Render IPs
+    const vercelOg = articles.filter((a) =>
+      !a.imageUrl && !a.url.includes("news.google.com") &&
+      VERCEL_OG_DOMAINS.some((d) => a.url.includes(d))
+    );
+    if (vercelOg.length) {
+      console.log(`[enrich] vercel-og: ${vercelOg.length} articles...`);
+      let voCount = 0;
+      for (let i = 0; i < vercelOg.length; i += 8) {
+        await Promise.allSettled(vercelOg.slice(i, i + 8).map(async (a) => {
+          const imageUrl = await fetchOgViaVercel(a.url);
+          if (imageUrl && !BAD_IMAGE_HOSTS.some((h) => imageUrl.includes(h))) {
+            const s3Url = await uploadImage(imageUrl, a.url);
+            a.imageUrl = s3Url || imageUrl;
+            queueImage(a.url, a.imageUrl);
+            voCount++;
+          }
+        }));
+        await flushCaches();
+      }
+      console.log(`[enrich] vercel-og done — images: ${voCount}/${vercelOg.length}`);
+    }
+
     // Step 2: Fetch page data (image + body) for all open-access articles in one request
     const fast = articles.filter((a) =>
       (!a.imageUrl || !a.body) &&
       !a.url.includes("news.google.com") &&
-      !HEADLESS_DOMAINS.some((d) => a.url.includes(d))
+      !HEADLESS_DOMAINS.some((d) => a.url.includes(d)) &&
+      !VERCEL_OG_DOMAINS.some((d) => a.url.includes(d))
     );
     if (fast.length) {
       console.log(`[enrich] fast: ${fast.length} articles...`);
