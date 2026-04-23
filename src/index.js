@@ -720,6 +720,11 @@ const server = http.createServer(async (req, res) => {
       const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50"), 1000);
       const source = url.searchParams.get("source");
       let articles = await getNews(1000);
+      // Patch missing bodies from cache (in-memory body may lag behind bodyCache)
+      for (const a of articles) {
+        if (!a.body && bodyCache[a.url]) a.body = bodyCache[a.url];
+        if (!a.imageUrl && imageCache[a.url]) a.imageUrl = imageCache[a.url];
+      }
       if (source) articles = articles.filter((a) => a.source.toLowerCase().includes(source.toLowerCase()));
       res.writeHead(200);
       return res.end(JSON.stringify({ ok: true, count: articles.slice(0, limit).length, fetchedAt: new Date(cache.fetchedAt).toISOString(), articles: articles.slice(0, limit) }));

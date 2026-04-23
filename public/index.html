@@ -198,10 +198,10 @@
   }
   .body-toggle {
     align-self: flex-start;
-    background: rgba(88,166,255,0.12);
-    border: 1px solid rgba(88,166,255,0.4);
+    background: rgba(63,185,80,0.15);
+    border: 1px solid rgba(63,185,80,0.5);
     border-radius: 4px;
-    color: var(--accent);
+    color: #3fb950;
     cursor: pointer;
     font-family: var(--font);
     font-size: 11px;
@@ -210,7 +210,7 @@
     transition: all 0.15s;
     letter-spacing: 0.2px;
   }
-  .body-toggle:hover { background: rgba(88,166,255,0.22); border-color: var(--accent); }
+  .body-toggle:hover { background: rgba(63,185,80,0.28); border-color: #3fb950; }
   .body-toggle.paywall {
     background: rgba(255,165,0,0.12);
     border-color: rgba(255,165,0,0.45);
@@ -400,7 +400,7 @@ function card(a) {
   const PAYWALLED = ["Arabian Business", "Reuters"];
   let bodyHtml = "";
   if (a.body) {
-    bodyHtml = `<button class="body-toggle" onclick="toggleBody(event,${idx})">Show scraped content</button>
+    bodyHtml = `<button class="body-toggle" onclick="toggleBody(event,${idx})">📄 Show scraped content</button>
                 <div class="card-body" id="body-${idx}">${esc(a.body)}</div>`;
   } else if (PAYWALLED.includes(a.source)) {
     bodyHtml = `<button class="body-toggle paywall" disabled>Content behind paywall</button>`;
@@ -425,7 +425,7 @@ function toggleBody(e, idx) {
   const el = document.getElementById("body-" + idx);
   const btn = e.currentTarget;
   const open = el.classList.toggle("open");
-  btn.textContent = open ? "Hide content" : "Show scraped content";
+  btn.textContent = open ? "🔼 Hide content" : "📄 Show scraped content";
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
