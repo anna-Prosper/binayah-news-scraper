@@ -163,7 +163,16 @@ async function fetchAll() {
       const feed = await parser.parseURL(url);
       for (const item of feed.items ?? []) {
         if (!item.title || !item.link) continue;
-        results.push({ source, title: item.title.trim(), url: item.link, summary: (item.contentSnippet || item.summary || "").slice(0, 300), imageUrl: item.enclosure?.url || item["media:content"]?.["$"]?.url || "", body: bodyCache[item.link] || "", publishedAt: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString() });
+        // Prefer cached (S3/enriched) image over RSS enclosure — the enclosure
+        // field is sometimes empty or churns as the feed rotates, but imageCache
+        // persists in Mongo across refreshes.
+        const rssImage = item.enclosure?.url || item["media:content"]?.["$"]?.url || "";
+        const cachedImage = imageCache[item.link];
+        const imageUrl = cachedImage || rssImage;
+        // Persist the RSS enclosure URL so it survives feed rotation — but only
+        // if we don't already have a better (enriched) one cached.
+        if (!cachedImage && rssImage) queueImage(item.link, rssImage);
+        results.push({ source, title: item.title.trim(), url: item.link, summary: (item.contentSnippet || item.summary || "").slice(0, 300), imageUrl, body: bodyCache[item.link] || "", publishedAt: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString() });
       }
       console.log(`[rss] ${source}: ${feed.items?.length ?? 0} items`);
     } catch (e) { console.warn(`[rss] ${source} failed:`, e.message); }
@@ -529,9 +538,11 @@ async function enrichWithImages(articles) {
       console.log(`[enrich] fast done — images: ${imgCount}, bodies: ${bodyCount}/${fast.length}`);
     }
 
-    // Step 3: Headless og:image for Cloudflare-protected domains, recent only
+    // Step 3: Headless og:image for Cloudflare-protected domains.
+    // No date filter — AB's full backlog (~128 articles) deserves enrichment,
+    // and imageCache persists so it's a one-time cost per article.
     const slow = articles
-      .filter((a) => !a.imageUrl && HEADLESS_DOMAINS.some((d) => a.url.includes(d)) && new Date(a.publishedAt).getTime() > sevenDaysAgo)
+      .filter((a) => !a.imageUrl && HEADLESS_DOMAINS.some((d) => a.url.includes(d)))
       .slice(0, 30);
     if (slow.length) {
       console.log(`[images] headless: ${slow.length} articles...`);
@@ -563,6 +574,10 @@ async function getNews(limit = 50) {
     cache.data = await fetchAll();
     cache.fetchedAt = Date.now();
     console.log(`[cache] ${cache.data.length} articles cached`);
+    // Flush RSS enclosure URLs captured during fetchAll so they're durable
+    // before enrichment starts (enrichment also flushes, but this guarantees
+    // feed rotation can't strip cached images between runs).
+    flushCaches().catch((e) => console.warn("[mongo] initial flush:", e.message));
     enrichWithImages(cache.data).catch((e) => console.warn("[enrich] failed:", e.message));
   }
   return cache.data.slice(0, limit);
