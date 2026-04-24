@@ -292,17 +292,52 @@
   </label>
 </header>
 
-<div id="filters">
-  <button class="filter-btn active" data-source="all">All</button>
+<!-- Top tab strip: News | Floor Plans -->
+<div id="tabs" style="display:flex;gap:4px;padding:0 32px;border-bottom:1px solid var(--border);background:var(--surface);">
+  <button class="tab-btn active" data-tab="news" style="background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);font-size:14px;font-weight:500;padding:12px 16px;cursor:pointer;font-family:var(--font);transition:all 0.15s;">News</button>
+  <button class="tab-btn" data-tab="tanami" style="background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);font-size:14px;font-weight:500;padding:12px 16px;cursor:pointer;font-family:var(--font);transition:all 0.15s;">Floor Plans (Tanami)</button>
 </div>
 
-<div id="status-bar"></div>
-
-<main>
-  <div id="grid">
-    <div id="loading"><div class="spinner"></div>Fetching articles…</div>
+<!-- News view -->
+<div id="view-news">
+  <div id="filters">
+    <button class="filter-btn active" data-source="all">All</button>
   </div>
-</main>
+  <div id="status-bar"></div>
+  <main>
+    <div id="grid">
+      <div id="loading"><div class="spinner"></div>Fetching articles…</div>
+    </div>
+  </main>
+</div>
+
+<!-- Tanami floor plans view (hidden by default) -->
+<div id="view-tanami" style="display:none;">
+  <div id="tanami-status" style="font-size:12px;color:var(--muted);padding:12px 32px 0;"></div>
+  <main>
+    <div id="tanami-projects" style="padding:24px 32px;display:flex;flex-direction:column;gap:32px;">
+      <div style="padding:60px 0;text-align:center;color:var(--muted);"><div class="spinner"></div>Loading floor plans…</div>
+    </div>
+  </main>
+</div>
+
+<style>
+  .tab-btn.active { color: var(--text) !important; border-bottom-color: var(--accent) !important; }
+  .tab-btn:hover { color: var(--text); }
+  .tanami-project { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+  .tanami-project-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tanami-project-title { font-size: 16px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+  .tanami-project-meta { font-size: 12px; color: var(--muted); display: flex; gap: 12px; flex-wrap: wrap; }
+  .tanami-project-meta span { background: var(--badge-bg); border: 1px solid var(--border); padding: 2px 8px; border-radius: 12px; }
+  .tanami-fp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+  .tanami-fp-card { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; transition: border-color 0.15s; cursor: pointer; }
+  .tanami-fp-card:hover { border-color: var(--accent); }
+  .tanami-fp-img { width: 100%; aspect-ratio: 1/1; object-fit: contain; background: #fff; display: block; }
+  .tanami-fp-info { padding: 10px 12px; font-size: 11px; color: var(--muted); line-height: 1.4; }
+  .tanami-fp-info strong { color: var(--text); font-weight: 500; }
+  .tanami-refresh-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); font-size: 12px; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-family: var(--font); }
+  .tanami-refresh-btn:hover { border-color: var(--accent); color: var(--text); }
+</style>
 
 <script>
 const API = "https://binayah-news-scraper.onrender.com/news?limit=1000";
@@ -457,6 +492,89 @@ document.getElementById("week-only").addEventListener("change", e => {
 });
 
 loadArticles();
+
+// ── Tanami Floor Plans tab ────────────────────────────────────────────────
+const TANAMI_API = "https://binayah-news-scraper.onrender.com/tanami";
+let tanamiLoaded = false;
+
+async function loadTanami(forceRefresh = false) {
+  const statusEl = document.getElementById("tanami-status");
+  const gridEl = document.getElementById("tanami-projects");
+  statusEl.textContent = forceRefresh ? "Triggering refresh…" : "Loading floor plans…";
+  try {
+    const res = await fetch(TANAMI_API + (forceRefresh ? "?refresh=1" : ""));
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    const projects = data.projects || [];
+    const fetched = data.fetchedAt ? new Date(data.fetchedAt) : null;
+    const totalPlans = projects.reduce((n, p) => n + (p.floorPlans?.length || 0), 0);
+
+    statusEl.innerHTML =
+      `${projects.length} projects · ${totalPlans} floor plans` +
+      (fetched ? ` · updated ${timeAgo(fetched)}` : "") +
+      (data.refreshing ? ' · <span style="color:#f0a040">refreshing in background…</span>' : "") +
+      ` <button class="tanami-refresh-btn" onclick="loadTanami(true)">↻ Refresh</button>`;
+
+    if (!projects.length) {
+      gridEl.innerHTML = `<div style="padding:60px 0;text-align:center;color:var(--muted);">${data.refreshing ? "Scraping… this takes a few minutes on first run." : "No floor plans yet."}</div>`;
+      return;
+    }
+
+    gridEl.innerHTML = projects
+      .filter((p) => !p.error)
+      .map((p) => {
+        const meta = p.summary || {};
+        const metaPills = [
+          meta.property_type,
+          meta.unit_type,
+          meta.size,
+          meta.handover ? `Handover: ${meta.handover}` : null,
+          meta.payment_plan ? `Payment: ${meta.payment_plan}` : null,
+        ].filter(Boolean);
+        const plans = p.floorPlans || [];
+        const planCards = plans
+          .map(
+            (fp) => `
+          <a class="tanami-fp-card" href="${esc(fp.imageUrl || fp.originalImageUrl || "#")}" target="_blank" rel="noopener noreferrer">
+            <img class="tanami-fp-img" src="${esc(fp.imageUrl || fp.originalImageUrl || "")}" alt="${esc(fp.alt || "")}" loading="lazy"/>
+            <div class="tanami-fp-info">
+              <strong>${esc(fp.unitType || fp.category || "Layout")}</strong><br/>
+              ${esc(fp.floorDetails || "")}<br/>
+              ${esc(fp.sizes || "")}
+            </div>
+          </a>`
+          )
+          .join("");
+        return `
+          <div class="tanami-project">
+            <div class="tanami-project-header">
+              <div>
+                <div class="tanami-project-title">${esc(p.title || p.slug)}</div>
+                <div class="tanami-project-meta">${metaPills.map((m) => `<span>${esc(m)}</span>`).join("")}</div>
+              </div>
+              <a href="${esc(p.url)}" target="_blank" rel="noopener noreferrer" style="font-size:12px;color:var(--accent);text-decoration:none;">View on Tanami →</a>
+            </div>
+            ${plans.length ? `<div class="tanami-fp-grid">${planCards}</div>` : '<div style="color:var(--muted);font-size:13px;">No floor plans scraped.</div>'}
+          </div>`;
+      })
+      .join("");
+    tanamiLoaded = true;
+  } catch (e) {
+    statusEl.textContent = "Failed to load: " + e.message;
+  }
+}
+
+// Tab switching
+document.querySelectorAll(".tab-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    const tab = btn.dataset.tab;
+    document.getElementById("view-news").style.display = tab === "news" ? "" : "none";
+    document.getElementById("view-tanami").style.display = tab === "tanami" ? "" : "none";
+    if (tab === "tanami" && !tanamiLoaded) loadTanami();
+  });
+});
 </script>
 </body>
 </html>

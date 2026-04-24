@@ -811,6 +811,254 @@ async function enrichWithImages(articles) {
   }
 }
 
+// ── Tanami floor-plan scraper ────────────────────────────────────────────────
+// Scrapes /Projects/{slug}-FloorPlans pages from tanamiproperties.com, uploads
+// images to S3, caches results in MongoDB. Tanami is CF-protected and each
+// CF clearance is single-page, so we use a fresh incognito context per visit.
+
+const TANAMI_SLUGS = [
+  "Kanyon-by-Beyond",
+  "Orise-by-Beyond",
+  "Saria-by-Beyond",
+  "Sensia-by-Beyond",
+  "The-Mural-by-Beyond",
+  "Talea-at-Dubai-Maritime-City",
+  "Haven-by-Aldar",
+  "Zuha-Island-Villas",
+  "Santorini-at-Damac-Lagoons",
+  "Golf-Point-at-Emaar-South-Dubai",
+  "Beach-Mansion",
+];
+
+const TANAMI_BASE = "https://www.tanamiproperties.com";
+let tanamiCache = { data: null, fetchedAt: 0 };
+let tanamiCol = null;
+let tanamiRefreshRunning = false;
+const TANAMI_TTL_MS = 12 * 60 * 60 * 1000; // 12h
+
+async function withFreshTanamiContext(fn) {
+  const b = await getBrowser();
+  const ctx = await b.createBrowserContext();
+  let page;
+  try {
+    page = await ctx.newPage();
+    await page.setUserAgent(CHROME_UA);
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "en-US,en;q=0.9",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    });
+    return await fn(page);
+  } finally {
+    await page?.close().catch(() => {});
+    await ctx.close().catch(() => {});
+  }
+}
+
+async function tanamiGotoAndClearCF(page, url) {
+  await page.setDefaultNavigationTimeout(40_000);
+  try { await page.goto(url, { waitUntil: "domcontentloaded", timeout: 40_000 }); } catch {}
+  for (let i = 0; i < 15; i++) {
+    const t = await page.title().catch(() => "");
+    if (!/just a moment|attention required/i.test(t)) break;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  await new Promise((r) => setTimeout(r, 1500));
+  const title = await page.title().catch(() => "");
+  return !/attention required|just a moment/i.test(title);
+}
+
+async function uploadTanamiImage(originalUrl) {
+  try {
+    const res = await fetch(originalUrl, {
+      headers: { "User-Agent": CHROME_UA },
+      signal: AbortSignal.timeout(15_000),
+      redirect: "follow",
+    });
+    if (!res.ok) return "";
+    const ct = res.headers.get("content-type") || "image/jpeg";
+    if (!ct.startsWith("image/")) return "";
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length < 2000) return "";
+    const ext = ct.includes("png") ? "png" : ct.includes("webp") ? "webp" : "jpg";
+    const hash = crypto.createHash("md5").update(originalUrl).digest("hex");
+    const key = `tanami/floor-plans/${hash}.${ext}`;
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: BUCKET,
+        Key: key,
+        Body: buf,
+        ContentType: ct,
+        CacheControl: "public, max-age=31536000",
+      })
+    );
+    return `https://${BUCKET}.s3.${process.env.AWS_REGION || "us-east-1"}.amazonaws.com/${key}`;
+  } catch {
+    return "";
+  }
+}
+
+async function scrapeTanamiOverview(slug) {
+  return withFreshTanamiContext(async (page) => {
+    const ok = await tanamiGotoAndClearCF(page, `${TANAMI_BASE}/Projects/${slug}`);
+    if (!ok) return null;
+    return page.evaluate(() => {
+      const summary = {};
+      for (const tr of document.querySelectorAll("#SummarId table tr")) {
+        const th = (tr.querySelector("th")?.textContent || "").replace(/:/g, "").trim().toLowerCase();
+        const td = (tr.querySelector("td")?.textContent || "").trim();
+        if (th && td) summary[th.replace(/\s+/g, "_")] = td;
+      }
+      return { pageTitle: document.title || "", summary };
+    });
+  });
+}
+
+async function scrapeTanamiFloorPlans(slug) {
+  return withFreshTanamiContext(async (page) => {
+    const ok = await tanamiGotoAndClearCF(page, `${TANAMI_BASE}/Projects/${slug}-FloorPlans`);
+    if (!ok) return [];
+
+    // scroll to trigger lazy image loads
+    await page.evaluate(async () => {
+      await new Promise((r) => {
+        let y = 0;
+        const step = () => {
+          window.scrollTo(0, y);
+          y += 500;
+          if (y < document.body.scrollHeight) setTimeout(step, 60); else r();
+        };
+        step();
+      });
+    }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 1000));
+
+    return page.evaluate(() => {
+      const getHeaders = (tbl) => {
+        const thCells = [...tbl.querySelectorAll("thead th")];
+        if (thCells.length) return thCells.map((x) => (x.textContent || "").trim().toLowerCase());
+        const firstRow = tbl.querySelector("tr");
+        return firstRow ? [...firstRow.querySelectorAll("th, td")].map((x) => (x.textContent || "").trim().toLowerCase()) : [];
+      };
+      const target = [...document.querySelectorAll("table")].find((t) => {
+        const h = getHeaders(t);
+        return h.includes("floor plan") && h.includes("sizes");
+      });
+      if (!target) return [];
+      const headers = getHeaders(target);
+      const hasTheadTh = target.querySelectorAll("thead th").length > 0;
+      const idx = {
+        image: headers.indexOf("floor plan"),
+        category: headers.indexOf("category"),
+        unitType: headers.indexOf("unit type"),
+        floorDetails: headers.indexOf("floor details"),
+        sizes: headers.indexOf("sizes"),
+        type: headers.indexOf("type"),
+      };
+      const dataRows = hasTheadTh ? [...target.querySelectorAll("tbody tr")] : [...target.querySelectorAll("tr")].slice(1);
+      const get = (cells, i) => (i >= 0 && cells[i] ? (cells[i].textContent || "").trim() : "");
+      const out = [];
+      for (const tr of dataRows) {
+        const cells = [...tr.querySelectorAll("td")];
+        if (cells.length < Math.max(idx.image, idx.sizes) + 1) continue;
+        const imgCell = cells[idx.image];
+        const img = imgCell?.querySelector("img");
+        const a = imgCell?.querySelector("a");
+        if (!img && !a) continue;
+        const originalImageUrl = a?.href || img?.getAttribute("data-echo") || img?.src || "";
+        out.push({
+          originalImageUrl,
+          alt: img?.alt || "",
+          category: get(cells, idx.category),
+          unitType: get(cells, idx.unitType),
+          floorDetails: get(cells, idx.floorDetails),
+          sizes: get(cells, idx.sizes),
+          type: get(cells, idx.type),
+        });
+      }
+      return out;
+    });
+  });
+}
+
+async function refreshTanami() {
+  if (tanamiRefreshRunning) return;
+  tanamiRefreshRunning = true;
+  console.log("[tanami] refresh starting...");
+  try {
+    const projects = [];
+    for (const slug of TANAMI_SLUGS) {
+      try {
+        console.log(`[tanami] ${slug} — overview`);
+        const overview = await scrapeTanamiOverview(slug);
+        await new Promise((r) => setTimeout(r, 1500));
+        console.log(`[tanami] ${slug} — floor plans`);
+        const rawPlans = await scrapeTanamiFloorPlans(slug);
+
+        // Upload each image to S3 (parallel batches of 4)
+        const plans = [];
+        for (let i = 0; i < rawPlans.length; i += 4) {
+          const batch = rawPlans.slice(i, i + 4);
+          const results = await Promise.all(
+            batch.map(async (p) => {
+              if (!p.originalImageUrl) return p;
+              const s3Url = await uploadTanamiImage(p.originalImageUrl);
+              return { ...p, imageUrl: s3Url || p.originalImageUrl };
+            })
+          );
+          plans.push(...results);
+        }
+
+        projects.push({
+          slug,
+          url: `${TANAMI_BASE}/Projects/${slug}`,
+          floorPlansUrl: `${TANAMI_BASE}/Projects/${slug}-FloorPlans`,
+          title: overview?.pageTitle || slug.replace(/-/g, " "),
+          summary: overview?.summary || {},
+          floorPlans: plans,
+        });
+        console.log(`[tanami] ${slug} — ${plans.length} plans, ${plans.filter((p) => p.imageUrl && p.imageUrl.includes(BUCKET)).length} uploaded`);
+        await new Promise((r) => setTimeout(r, 2000));
+      } catch (e) {
+        console.warn(`[tanami] ${slug} failed: ${e.message?.slice(0, 100)}`);
+        projects.push({ slug, error: e.message?.slice(0, 120) });
+      }
+    }
+    tanamiCache = { data: projects, fetchedAt: Date.now() };
+    if (tanamiCol) {
+      try {
+        await tanamiCol.updateOne(
+          { _id: "snapshot" },
+          { $set: { projects, fetchedAt: new Date() } },
+          { upsert: true }
+        );
+        console.log("[tanami] saved to mongo");
+      } catch (e) {
+        console.warn("[tanami] mongo save:", e.message);
+      }
+    }
+    const totalPlans = projects.reduce((n, p) => n + (p.floorPlans?.length || 0), 0);
+    console.log(`[tanami] refresh complete — ${projects.length} projects, ${totalPlans} floor plans`);
+  } finally {
+    tanamiRefreshRunning = false;
+    await _browser?.close().catch(() => {}); _browser = null;
+  }
+}
+
+async function loadTanamiCache() {
+  if (!mongoClient) return;
+  try {
+    const db = mongoClient.db(process.env.MONGODB_DB || "db_migration");
+    tanamiCol = db.collection("newsScraper_tanamiCache");
+    const doc = await tanamiCol.findOne({ _id: "snapshot" });
+    if (doc?.projects) {
+      tanamiCache = { data: doc.projects, fetchedAt: doc.fetchedAt?.getTime?.() || Date.now() };
+      console.log(`[tanami] loaded from mongo — ${doc.projects.length} projects`);
+    }
+  } catch (e) {
+    console.warn("[tanami] mongo load:", e.message);
+  }
+}
+
 // ── Cache ─────────────────────────────────────────────────────────────────────
 
 let cache = { data: null, fetchedAt: 0 };
@@ -838,8 +1086,22 @@ setInterval(() => {
 }, 2 * 60 * 1000);
 
 loadCaches()
-  .then(() => getNews())
+  .then(async () => {
+    await loadTanamiCache();
+    getNews().catch((e) => console.warn("News startup:", e.message));
+    // Kick off tanami refresh if cache is empty or stale
+    if (!tanamiCache.data || Date.now() - tanamiCache.fetchedAt > TANAMI_TTL_MS) {
+      setTimeout(() => {
+        refreshTanami().catch((e) => console.warn("[tanami] startup refresh:", e.message));
+      }, 30_000); // wait 30s after startup so news enrichment gets priority
+    }
+  })
   .catch((e) => console.warn("Startup failed:", e.message));
+
+// Refresh Tanami every 12h
+setInterval(() => {
+  refreshTanami().catch((e) => console.warn("[tanami] interval refresh:", e.message));
+}, TANAMI_TTL_MS);
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
 
@@ -874,8 +1136,25 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (req.method === "GET" && url.pathname === "/tanami") {
+    // Trigger refresh if requested, or if cache is empty/stale
+    const wantRefresh = url.searchParams.get("refresh") === "1";
+    if (wantRefresh || !tanamiCache.data) {
+      refreshTanami().catch((e) => console.warn("[tanami] on-demand refresh:", e.message));
+    }
+    res.writeHead(200);
+    return res.end(
+      JSON.stringify({
+        ok: true,
+        refreshing: tanamiRefreshRunning,
+        fetchedAt: tanamiCache.fetchedAt ? new Date(tanamiCache.fetchedAt).toISOString() : null,
+        projects: tanamiCache.data || [],
+      })
+    );
+  }
+
   res.writeHead(404);
-  res.end(JSON.stringify({ error: "Not found. Use GET /news or GET /health" }));
+  res.end(JSON.stringify({ error: "Not found. Use GET /news, /tanami, or /health" }));
 });
 
 server.listen(PORT, () => console.log(`binayah-news-scraper listening on port ${PORT}`));
