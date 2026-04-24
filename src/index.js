@@ -851,12 +851,18 @@ async function getTanamiBrowser() {
   return _tanamiBrowser;
 }
 
+// @sparticuz/chromium runs --single-process, which doesn't support multiple
+// BrowserContexts. Instead, we use the default context and clear cookies/cache
+// before each navigation to simulate a fresh session (needed because Tanami's
+// CF only clears one navigation per cookie state).
 async function withFreshTanamiContext(fn) {
   const b = await getTanamiBrowser();
-  const ctx = await b.createBrowserContext();
   let page;
   try {
-    page = await ctx.newPage();
+    page = await b.newPage();
+    const cdp = await page.target().createCDPSession();
+    await cdp.send("Network.clearBrowserCookies").catch(() => {});
+    await cdp.send("Network.clearBrowserCache").catch(() => {});
     await page.setUserAgent(CHROME_UA);
     await page.setExtraHTTPHeaders({
       "Accept-Language": "en-US,en;q=0.9",
@@ -865,7 +871,6 @@ async function withFreshTanamiContext(fn) {
     return await fn(page);
   } finally {
     await page?.close().catch(() => {});
-    await ctx.close().catch(() => {});
   }
 }
 
