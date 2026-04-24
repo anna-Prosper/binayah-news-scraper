@@ -836,8 +836,23 @@ let tanamiCol = null;
 let tanamiRefreshRunning = false;
 const TANAMI_TTL_MS = 12 * 60 * 60 * 1000; // 12h
 
+// Dedicated Tanami browser — isolated from the shared `_browser` used by news
+// enrichment (which closes between runs and would kill Tanami mid-scrape).
+let _tanamiBrowser = null;
+async function getTanamiBrowser() {
+  if (_tanamiBrowser?.connected) return _tanamiBrowser;
+  _tanamiBrowser = await puppeteer.launch({
+    args: chromium.args,
+    defaultViewport: { width: 1366, height: 900 },
+    executablePath: await chromium.executablePath(),
+    headless: true,
+  });
+  _tanamiBrowser.on("disconnected", () => { _tanamiBrowser = null; });
+  return _tanamiBrowser;
+}
+
 async function withFreshTanamiContext(fn) {
-  const b = await getBrowser();
+  const b = await getTanamiBrowser();
   const ctx = await b.createBrowserContext();
   let page;
   try {
@@ -1040,7 +1055,8 @@ async function refreshTanami() {
     console.log(`[tanami] refresh complete — ${projects.length} projects, ${totalPlans} floor plans`);
   } finally {
     tanamiRefreshRunning = false;
-    await _browser?.close().catch(() => {}); _browser = null;
+    // Close our dedicated browser — frees memory on Render's small instances
+    await _tanamiBrowser?.close().catch(() => {}); _tanamiBrowser = null;
   }
 }
 
